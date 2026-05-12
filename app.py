@@ -16,8 +16,14 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 from ocr.easyocr_english import EnglishEasyOCR
 from ocr.paddleocr_english import EnglishPaddleOCR
 from ocr.surya_ocr import SuryaOCR
-from detect_bubbles import detect_bubbles
-from process_bubble import process_bubble, process_bubble_auto, is_dark_bubble, get_bubble_background_color, get_dominant_color, process_bubble_preserve_gradient
+from detectors import (
+    detect_page_regions,
+    detect_page_regions_layout_first,
+)
+from detectors.runtime_utils import (
+    bubble_region_to_crop_data,
+    process_bubble_with_mask,
+)
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
 from add_text import add_text
@@ -60,6 +66,23 @@ def log(msg):
 
 MODEL_PATH = "model/model.pt"
 
+
+def detect_legacy_bubbles(image, enable_black_bubble=True):
+    return detect_page_regions(
+        MODEL_PATH,
+        image,
+        enable_black_bubble=enable_black_bubble,
+    ).to_legacy_detections()
+
+
+def unpack_legacy_bubble_detection(result):
+    if len(result) >= 7:
+        x1, y1, x2, y2, score, class_id, is_dark = result[:7]
+    else:
+        x1, y1, x2, y2, score, class_id = result[:6]
+        is_dark = 0
+    return int(x1), int(y1), int(x2), int(y2), score, class_id, int(is_dark)
+
 # Default max height for split (1.5x width = landscape-ish ratio)
 DEFAULT_SPLIT_HEIGHT_RATIO = 2.0
 
@@ -71,6 +94,28 @@ _OCR_CACHE = {
     "paddleocr_en": None,
     "surya_en": None,
 }
+
+def group_text_regions_by_bubble(text_regions):
+    text_regions_by_bubble = {}
+    for text_region in text_regions:
+        if text_region.bubble_id is None:
+            # TODO: render unmatched outside-bubble text regions in a later lettering pass.
+            continue
+        text_regions_by_bubble.setdefault(text_region.bubble_id, []).append(text_region)
+    return text_regions_by_bubble
+
+
+def get_first_layout_first_bubble_crop(image):
+    page_detection_result = detect_page_regions_layout_first(image)
+    if not page_detection_result.bubbles:
+        return None
+
+    crop_data = bubble_region_to_crop_data(
+        image,
+        page_detection_result.bubbles[0],
+        (),
+    )
+    return crop_data["bubble_crop"]
 
 def split_long_image(image: np.ndarray, max_height_ratio: float = DEFAULT_SPLIT_HEIGHT_RATIO) -> list:
     """
@@ -123,9 +168,13 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     Optimized with batch translation for Gemini to reduce API calls.
     Supports auto font matching when font_analyzer is provided and selected_font is 'auto'.
     """
-    results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
+    page_detection_result = detect_page_regions_layout_first(image)
+    bubble_regions = page_detection_result.bubbles
+    text_regions_by_bubble = group_text_regions_by_bubble(
+        page_detection_result.text_regions
+    )
     
-    if not results:
+    if not bubble_regions:
         return image
     
     # Phase 1: Collect all bubble data and OCR texts
@@ -133,31 +182,37 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     texts_to_translate = []
     first_bubble_image = None  # For font analysis
     
-    for result in results:
-        # Handle both old format (6 items) and new format (7 items with is_dark_bubble)
-        if len(result) >= 7:
-            x1, y1, x2, y2, score, class_id, is_dark = result[:7]
-        else:
-            x1, y1, x2, y2, score, class_id = result[:6]
-            is_dark = 0
-        
-        detected_image = image[int(y1):int(y2), int(x1):int(x2)]
+    for bubble_idx, bubble_region in enumerate(bubble_regions):
+        crop_data = bubble_region_to_crop_data(
+            image,
+            bubble_region,
+            text_regions_by_bubble.get(bubble_idx, []),
+        )
+        bubble_bbox = crop_data["bubble_bbox"]
+        x1, y1, x2, y2 = bubble_bbox
+        detected_image = crop_data["bubble_crop"]
+        mask_crop = crop_data["mask_crop"]
+        ocr_crop = crop_data["ocr_crop"]
         
         # Save first bubble for font analysis (before processing)
         if first_bubble_image is None:
             first_bubble_image = detected_image.copy()
         
         # Fix: detected_image is already uint8, no need to multiply by 255
-        im = Image.fromarray(detected_image)
+        im = Image.fromarray(ocr_crop.copy())
         text = mocr(im)
         
-        # Use auto detection or forced dark based on detection flag
-        detected_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+        detected_image, cont, bubble_is_dark, detected_color = process_bubble_with_mask(
+            detected_image,
+            mask_crop,
+            force_dark=bubble_region.is_dark,
+        )
+        bubble_region.fill_color = detected_color
         
         bubble_data.append({
             'detected_image': detected_image,
             'contour': cont,
-            'coords': (int(x1), int(y1), int(x2), int(y2)),
+            'coords': (x1, y1, x2, y2),
             'is_dark': bubble_is_dark,
             'fill_color': detected_color
         })
@@ -323,37 +378,49 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         emit_progress('detection', idx + 1, total_images, f'Phát hiện bubbles: {name}')
         print(f"  [{idx+1}/{total_images}] {name}", end="", flush=True)
         
-        results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
-        if not results:
+        page_detection_result = detect_page_regions_layout_first(image)
+        bubble_regions = page_detection_result.bubbles
+        text_regions_by_bubble = group_text_regions_by_bubble(
+            page_detection_result.text_regions
+        )
+        if not bubble_regions:
             all_pages_data[name] = {'image': image, 'bubbles': [], 'texts': []}
             print(f" - 0 bubbles")
             continue
         
-        print(f" - {len(results)} bubbles")
+        print(f" - {len(bubble_regions)} bubbles")
         
         bubble_data = []
         
-        for bubble_idx, result in enumerate(results):
-            # Handle both old format (6 items) and new format (7 items with is_dark_bubble)
-            if len(result) >= 7:
-                x1, y1, x2, y2, score, class_id, is_dark = result[:7]
-            else:
-                x1, y1, x2, y2, score, class_id = result[:6]
-                is_dark = 0
-            
-            detected_image = image[int(y1):int(y2), int(x1):int(x2)]
+        for bubble_idx, bubble_region in enumerate(bubble_regions):
+            crop_data = bubble_region_to_crop_data(
+                image,
+                bubble_region,
+                text_regions_by_bubble.get(bubble_idx, []),
+            )
+            bubble_bbox = crop_data["bubble_bbox"]
+            x1, y1, x2, y2 = bubble_bbox
+            detected_image = crop_data["bubble_crop"]
+            mask_crop = crop_data["mask_crop"]
+            ocr_crop = crop_data["ocr_crop"]
             
             # IMPORTANT: Add to OCR queue BEFORE processing (which fills white/black)
-            all_bubble_images.append(Image.fromarray(detected_image.copy()))
+            all_bubble_images.append(Image.fromarray(ocr_crop.copy()))
             bubble_mapping.append((name, bubble_idx))
             
-            # Process bubble (fill with auto-detected or specified color based on type)
-            processed_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+            processed_image, cont, bubble_is_dark, detected_color = process_bubble_with_mask(
+                detected_image,
+                mask_crop,
+                force_dark=bubble_region.is_dark,
+            )
+            bubble_region.fill_color = detected_color
             
             bubble_data.append({
+                'bubble_region': bubble_region,
                 'detected_image': processed_image,
                 'contour': cont,
-                'coords': (int(x1), int(y1), int(x2), int(y2)),
+                'coords': (x1, y1, x2, y2),
+                'mask_crop': mask_crop,
                 'is_dark': bubble_is_dark,
                 'fill_color': detected_color
             })
@@ -721,10 +788,8 @@ def upload_file():
         # Auto font: analyze first image
         if selected_font == "auto" and font_analyzer is not None:
             try:
-                results = detect_bubbles(MODEL_PATH, all_images[0]['image'], enable_black_bubble)
-                if results:
-                    x1, y1, x2, y2, _, _ = results[0]
-                    first_bubble = all_images[0]['image'][int(y1):int(y2), int(x1):int(x2)]
+                first_bubble = get_first_layout_first_bubble_crop(all_images[0]['image'])
+                if first_bubble is not None and getattr(first_bubble, "size", 0) > 0:
                     selected_font = font_analyzer.analyze_and_match(first_bubble)
                     print(f"Auto font matched: {selected_font}")
                 else:
@@ -832,10 +897,8 @@ def upload_file():
                     # Auto font: analyze FIRST image only
                     if selected_font == "auto" and font_analyzer is not None and not auto_font_determined:
                         try:
-                            results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
-                            if results:
-                                x1, y1, x2, y2, _, _ = results[0]
-                                first_bubble = image[int(y1):int(y2), int(x1):int(x2)]
+                            first_bubble = get_first_layout_first_bubble_crop(image)
+                            if first_bubble is not None and getattr(first_bubble, "size", 0) > 0:
                                 selected_font = font_analyzer.analyze_and_match(first_bubble)
                                 print(f"Auto font matched (once for all images): {selected_font}")
                             else:
