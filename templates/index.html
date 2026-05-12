@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <title>Manga Translator</title>
+   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+   <link href="https://fonts.googleapis.com/css2?family=Exo+2:ital,wght@0,100..900;1,100..900&display=swap"
+      rel="stylesheet">
+</head>
+
+<body>
+   <header>
+   </header>
+   <div class="container">
+      <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Manga Translator">
+      <form action="/translate" method="post" enctype="multipart/form-data" onsubmit="return updateHiddenInputs()">
+
+         <!-- 2-column grid for dropdowns -->
+         <div class="form-grid">
+            <!-- Row 1: Source & Target Language -->
+            <div class="select-wrapper">
+               <label class="translator-label">Ngôn ngữ gốc</label>
+               <div class="custom-select" id="source_lang" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Japanese (Manga)</span>
+                     <span class="option">Chinese (Manhua)</span>
+                     <span class="option">Korean (Manhwa)</span>
+                     <span class="option">English (Comic)</span>
+                  </div>
+               </div>
+            </div>
+
+            <div class="select-wrapper">
+               <label class="translator-label">Dịch sang</label>
+               <div class="custom-select" id="language" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Vietnamese</span>
+                     <span class="option">English</span>
+                     <span class="option">Chinese</span>
+                     <span class="option">Korean</span>
+                     <span class="option">Thai</span>
+                     <span class="option">Indonesian</span>
+                     <span class="option">French</span>
+                     <span class="option">German</span>
+                     <span class="option">Spanish</span>
+                     <span class="option">Russian</span>
+                  </div>
+               </div>
+            </div>
+
+            <!-- Row 2: Translator & Style -->
+            <div class="select-wrapper">
+               <label class="translator-label">Translator</label>
+               <div class="custom-select" id="translator" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Gemini</span>
+                     <span class="option">Local LLM</span>
+					 <span class="option">DeepSeek</span>
+                     <span class="option">Google</span>
+                     <span class="option">NLLB</span>
+                     <span class="option">Baidu</span>
+                     <span class="option">Bing</span>
+                  </div>
+               </div>
+            </div>
+
+            <div class="select-wrapper">
+               <label class="translator-label">Phong cách dịch</label>
+               <div class="custom-select" id="style" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Default</span>
+                     <span class="option">Casual (thân mật)</span>
+                     <span class="option">Formal (trang trọng)</span>
+                     <span class="option">Keep Honorifics (-san, senpai...)</span>
+                     <span class="option">Web Novel Style</span>
+                     <span class="option">Action (ngắn gọn)</span>
+                     <span class="option">Literal (sát nghĩa)</span>
+                     <span class="option">Custom...</span>
+                  </div>
+               </div>
+            </div>
+
+            <!-- Row 3: Font & OCR -->
+            <div class="select-wrapper">
+               <label class="translator-label">Font</label>
+               <div class="custom-select" id="font" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Auto (Match Original)</span>
+                     <span class="option">Animeace</span>
+                     <span class="option">Mangat</span>
+                     <span class="option">Arial</span>
+                     <span class="option">Yuki-Arenzi</span>
+                     <span class="option">Yuki-Burobu</span>
+                     <span class="option">Yuki-CCMarianChurchlandJournal</span>
+                     <span class="option">Yuki-CDX Starstreak</span>
+                     <span class="option">Yuki-CHICKEN Pie</span>
+                     <span class="option">Yuki-CrashLanding BB</span>
+                     <span class="option">Yuki-Downhill Dive</span>
+                     <span class="option">Yuki-Gingerline DEMO Regular</span>
+                     <span class="option">Yuki-Gorrilaz_Story</span>
+                     <span class="option">Yuki-KG Only Angel</span>
+                     <span class="option">Yuki-LF SwandsHand</span>
+                     <span class="option">Yuki-La Belle Aurore</span>
+                     <span class="option">Yuki-Little Cupcakes</span>
+                     <span class="option">Yuki-Nagurigaki Crayon</span>
+                     <span class="option">Yuki-Ripsnort BB</span>
+                     <span class="option">Yuki-Roasthink</span>
+                     <span class="option">Yuki-Screwball</span>
+                     <span class="option">Yuki-Shark Crash</span>
+                     <span class="option">Yuki-Skulduggery</span>
+                     <span class="option">Yuki-Superscratchy</span>
+                     <span class="option">Yuki-Tea And Oranges Regular</span>
+                  </div>
+               </div>
+            </div>
+
+            <div class="select-wrapper">
+               <label class="translator-label">OCR Engine</label>
+               <div class="custom-select" id="ocr" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Chrome-Lens</span>
+                     <span class="option">Manga-OCR</span>
+					 <span class="option">EasyOCR-English</span>
+					 <span class="option">Surya-English</span>
+                  </div>
+               </div>
+            </div>
+         </div>
+
+         <!-- Context Memory Toggle -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="context_memory" name="context_memory" checked>
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">🧠 Context Memory (dùng context từ tất cả ảnh để dịch chính xác hơn)</span>
+            </label>
+         </div>
+
+         <!-- Black Bubble Detection Toggle -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="detect_black_bubbles" name="detect_black_bubbles" checked>
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">🖤 Scan bóng thoại đen (phát hiện speech bubble tối màu bằng OpenCV)</span>
+            </label>
+         </div>
+
+         <!-- Split Long Images Toggle -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="split_long_images" name="split_long_images">
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">✂️ Cắt ảnh dài (tự động chia ảnh dài thành nhiều phần, phù hợp manhwa/webtoon)</span>
+            </label>
+         </div>
+
+         <!-- Custom Prompt (show when Custom selected) -->
+         <div class="select-wrapper full-width" id="custom-prompt-wrapper" style="display: none;">
+            <label class="translator-label">Custom Prompt</label>
+            <textarea id="custom_prompt" name="custom_prompt"
+               placeholder="Ví dụ: Dịch theo phong cách light novel, giữ nguyên tên nhân vật..." rows="2"></textarea>
+         </div>
+
+         <!-- Local LLM Settings (show when Local LLM selected) -->
+         <div id="copilot-settings" style="display: none; width: 100%;">
+            <div class="form-grid">
+               <div class="select-wrapper">
+                  <label class="translator-label">Server URL</label>
+                  <input type="text" id="copilot_server" name="copilot_server" value="http://localhost:8080"
+                     placeholder="http://localhost:11434 (Ollama)" class="text-input">
+                  <small style="color: #888; font-size: 11px; margin-top: 4px; display: block;">
+                     Ollama: 11434 | LM Studio: 1234 | LocalAI: 8080
+                  </small>
+               </div>
+               <div class="select-wrapper">
+                  <label class="translator-label">Model Name</label>
+                  <input type="text" id="copilot_model_input" name="copilot_model_input" value="gpt-4.1"
+                     placeholder="llama3.2, qwen2.5, mistral..." class="text-input">
+                  <small style="color: #888; font-size: 11px; margin-top: 4px; display: block;">
+                     Nhập tên model đang chạy trên server
+                  </small>
+               </div>
+            </div>
+         </div>
+
+
+         <!-- Gemini Settings (show when Gemini selected) -->
+         <div id="gemini-settings" style="display: block; width: 100%;">
+            <div class="select-wrapper">
+               <label class="translator-label">Gemini API Key</label>
+               <input type="password" id="gemini_api_key" name="gemini_api_key"
+                  placeholder="Nhập API key của bạn (lấy từ ai.google.dev)" value="AIzaSyCrWoDqVPRrHl1P5qD2JiJsR4xAS1AA24o" style="width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;">
+               <small style="color: #666; font-size: 12px; margin-top: 4px; display: block;">
+                  🔒 Key được lưu trong trình duyệt của bạn (localStorage)
+               </small>
+            </div>
+         </div>
+		
+		<div id="deepseek-settings" class="translator-settings" style="display:none;">
+		  <label>DeepSeek API Key</label>
+		  <input
+			type="password"
+			name="deepseek_api_key"
+			placeholder="sk-..."
+			autocomplete="off"
+			value="sk-20a9fd467d544685a83ce74f7b86abdd"
+		  >
+
+		  <label>DeepSeek Model</label>
+		  <select name="deepseek_model">
+			<option value="deepseek-v4-flash" selected>deepseek-v4-flash</option>
+			<option value="deepseek-v4-pro">deepseek-v4-pro</option>
+		  </select>
+
+		  <label style="display:flex; gap:8px; align-items:center;">
+			<input type="checkbox" name="deepseek_thinking">
+			Enable thinking mode
+		  </label>
+		</div>
+		
+         <!-- File upload -->
+         <input id="file-upload" type="file" name="files" accept=".jpg, .jpeg, .png" multiple required>
+         <label for="file-upload" class="file" id="file-label">
+            <span id="file-text">📁 Chọn ảnh</span>
+         </label>
+         <div id="file-list" class="file-list"></div>
+
+         <input type="hidden" id="selected_source_lang" name="selected_source_lang">
+         <input type="hidden" id="selected_language" name="selected_language">
+         <input type="hidden" id="selected_translator" name="selected_translator">
+         <input type="hidden" id="selected_style" name="selected_style">
+         <input type="hidden" id="selected_font" name="selected_font">
+         <input type="hidden" id="selected_ocr" name="selected_ocr">
+         <button type="submit">Translate</button>
+      </form>
+
+      <!-- Progress Bar -->
+      <div id="progress-container" style="display: none; margin-top: 20px;">
+         <div id="progress-phase" style="font-size: 12px; color: #666; margin-bottom: 5px; text-align: center;"></div>
+         <div style="background: #e0e0e0; border-radius: 10px; overflow: hidden; height: 20px;">
+            <div id="progress-bar"
+               style="height: 100%; background: linear-gradient(90deg, #5E1675, #8e44ad); width: 0%; transition: width 0.3s ease;">
+            </div>
+         </div>
+         <div id="progress-text" style="font-size: 13px; color: #333; margin-top: 8px; text-align: center;"></div>
+      </div>
+
+      <img id="loading-img" src="{{ url_for('static', filename='img/loading.gif') }}" alt="">
+      <p id="loading-p">Đang xử lý... Vui lòng đợi!</p>
+   </div>
+
+   <!-- Socket.IO for real-time progress -->
+   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+   <script>
+      // Real-time progress updates
+      document.addEventListener('DOMContentLoaded', function () {
+         const socket = io();
+         const progressContainer = document.getElementById('progress-container');
+         const progressBar = document.getElementById('progress-bar');
+         const progressText = document.getElementById('progress-text');
+         const progressPhase = document.getElementById('progress-phase');
+
+         const phaseNames = {
+            'detection': '🔍 Phát hiện bubbles',
+            'ocr': '📖 OCR nhận dạng text',
+            'translation': '🌐 Dịch văn bản',
+            'rendering': '✏️ Render text vào ảnh',
+            'done': '✅ Hoàn tất'
+         };
+
+         socket.on('progress', function (data) {
+            progressContainer.style.display = 'block';
+
+            const phaseName = phaseNames[data.phase] || data.phase;
+            progressPhase.textContent = phaseName;
+            progressBar.style.width = data.percent + '%';
+            progressText.textContent = data.message;
+
+            if (data.phase === 'done') {
+               progressBar.style.background = 'linear-gradient(90deg, #50C878, #2ecc71)';
+            }
+         });
+
+         // Show progress when form submitted
+         document.querySelector('form').addEventListener('submit', function () {
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.style.background = 'linear-gradient(90deg, #5E1675, #8e44ad)';
+            progressText.textContent = 'Khởi tạo...';
+            progressPhase.textContent = '⏳ Chuẩn bị';
+         });
+      });
+   </script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+   const translatorDropdown = document.getElementById('translator');
+   const translatorSelectedText = translatorDropdown.querySelector('.selected');
+
+   const hiddenTranslatorInput = document.getElementById('selected_translator');
+
+   const geminiSettings = document.getElementById('gemini-settings');
+   const copilotSettings = document.getElementById('copilot-settings');
+   const deepseekSettings = document.getElementById('deepseek-settings');
+
+   function getSelectedTranslator() {
+      return translatorSelectedText.textContent.trim();
+   }
+
+   function show(el, shouldShow) {
+      if (!el) return;
+      el.style.display = shouldShow ? 'block' : 'none';
+   }
+
+   function updateTranslatorSettings() {
+      const value = getSelectedTranslator();
+
+      // Giữ hidden input sync luôn, không cần đợi submit
+      if (hiddenTranslatorInput) {
+         hiddenTranslatorInput.value = value;
+      }
+
+      show(geminiSettings, value === 'Gemini');
+      show(copilotSettings, value === 'Local LLM');
+      show(deepseekSettings, value === 'DeepSeek');
+   }
+
+   translatorDropdown.querySelectorAll('.option').forEach(function (option) {
+      option.addEventListener('click', function () {
+         // Đợi app.js cập nhật span.selected trước
+         setTimeout(updateTranslatorSettings, 0);
+      });
+   });
+
+   // Chạy một lần lúc load trang
+   setTimeout(updateTranslatorSettings, 0);
+});
+</script>
+</body>
+
+</html>
