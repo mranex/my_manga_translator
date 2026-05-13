@@ -108,6 +108,7 @@ _OCR_CACHE = {
     "manga_ocr": None,
     "easyocr_en": None,
     "paddleocr_en": None,
+    "paddleocr_vl": None,
     "surya_en": None,
 }
 _INPAINTER_CACHE = {
@@ -1036,7 +1037,16 @@ def upload_file():
         selected_font = selected_font_raw
 
     # Get OCR engine
-    selected_ocr = request.form.get("selected_ocr", "chrome-lens").lower()
+    selected_ocr_raw = request.form.get("selected_ocr", "Chrome-Lens").strip()
+    selected_ocr = {
+        "chrome-lens": "chrome-lens",
+        "manga-ocr": "manga-ocr",
+        "easyocr-english": "easyocr-english",
+        "paddleocr-english": "paddleocr-english",
+        "surya-english": "surya-english",
+        "paddleocr-vl local": "paddleocr-vl",
+        "paddleocr-vl": "paddleocr-vl",
+    }.get(selected_ocr_raw.lower(), selected_ocr_raw.lower())
     
     # Get source language
     source_lang_map = {
@@ -1121,54 +1131,71 @@ def upload_file():
 
         print(f"Using DeepSeek API: model={manga_translator._deepseek_model}, thinking={deepseek_thinking}")
         
-    if selected_ocr == "chrome-lens":
-        if _OCR_CACHE["chrome_lens"] is None:
-            _OCR_CACHE["chrome_lens"] = ChromeLensOCR()
-        mocr = _OCR_CACHE["chrome_lens"]
-        
-    elif selected_ocr == "easyocr-english":
-        if _OCR_CACHE["easyocr_en"] is None:
-            _OCR_CACHE["easyocr_en"] = EnglishEasyOCR(gpu=True)
-        mocr = _OCR_CACHE["easyocr_en"]
-    
-    elif selected_ocr == "paddleocr-english":
-        if _OCR_CACHE["paddleocr_en"] is None:
-            try:
-                from ocr.paddleocr_english import EnglishPaddleOCR
-            except Exception as exc:
-                raise RuntimeError(f"PaddleOCR is unavailable in this environment: {exc}") from exc
-            _OCR_CACHE["paddleocr_en"] = EnglishPaddleOCR(
-                device="gpu:0",
-                min_score=0.05,
-                debug=True,
-                keep_debug_images=True,
-            )
-        mocr = _OCR_CACHE["paddleocr_en"]
-        
-    elif selected_ocr == "surya-english":
-        if _OCR_CACHE["surya_en"] is None:
-            try:
-                from ocr.surya_ocr import SuryaOCR
-            except Exception as exc:
-                raise RuntimeError(f"Surya OCR is unavailable in this environment: {exc}") from exc
-            _OCR_CACHE["surya_en"] = SuryaOCR(
-                min_confidence=0.15,
-                min_side=900,
-                padding=18,
-                task_name="ocr_with_boxes",
-                preserve_line_breaks=False,
-                sort_lines=False,
-                disable_math=True,
-                batch_size=5,
-                clear_vram_after_batch=True,
-                verbose=False,
-            )
-        mocr = _OCR_CACHE["surya_en"]
-        
-    else:
-        if _OCR_CACHE["manga_ocr"] is None:
-            _OCR_CACHE["manga_ocr"] = MangaOcr()
-        mocr = _OCR_CACHE["manga_ocr"]
+    try:
+        if selected_ocr == "chrome-lens":
+            if _OCR_CACHE["chrome_lens"] is None:
+                _OCR_CACHE["chrome_lens"] = ChromeLensOCR()
+            mocr = _OCR_CACHE["chrome_lens"]
+
+        elif selected_ocr == "easyocr-english":
+            if _OCR_CACHE["easyocr_en"] is None:
+                _OCR_CACHE["easyocr_en"] = EnglishEasyOCR(gpu=True)
+            mocr = _OCR_CACHE["easyocr_en"]
+
+        elif selected_ocr == "paddleocr-english":
+            if _OCR_CACHE["paddleocr_en"] is None:
+                try:
+                    from ocr.paddleocr_english import EnglishPaddleOCR
+                except Exception as exc:
+                    raise RuntimeError(f"PaddleOCR is unavailable in this environment: {exc}") from exc
+                _OCR_CACHE["paddleocr_en"] = EnglishPaddleOCR(
+                    device="gpu:0",
+                    min_score=0.05,
+                    debug=True,
+                    keep_debug_images=True,
+                )
+            mocr = _OCR_CACHE["paddleocr_en"]
+
+        elif selected_ocr == "paddleocr-vl":
+            if _OCR_CACHE["paddleocr_vl"] is None:
+                from ocr.paddleocr_vl_ocr import PaddleOCRVLOCR
+
+                _OCR_CACHE["paddleocr_vl"] = PaddleOCRVLOCR()
+            mocr = _OCR_CACHE["paddleocr_vl"]
+            print("Using PaddleOCR-VL via llama.cpp")
+            print(f"PaddleOCR-VL server: {mocr.server_url}")
+
+        elif selected_ocr == "surya-english":
+            if _OCR_CACHE["surya_en"] is None:
+                try:
+                    from ocr.surya_ocr import SuryaOCR
+                except Exception as exc:
+                    raise RuntimeError(f"Surya OCR is unavailable in this environment: {exc}") from exc
+                _OCR_CACHE["surya_en"] = SuryaOCR(
+                    min_confidence=0.15,
+                    min_side=900,
+                    padding=18,
+                    task_name="ocr_with_boxes",
+                    preserve_line_breaks=False,
+                    sort_lines=False,
+                    disable_math=True,
+                    batch_size=5,
+                    clear_vram_after_batch=True,
+                    verbose=False,
+                )
+            mocr = _OCR_CACHE["surya_en"]
+
+        else:
+            if _OCR_CACHE["manga_ocr"] is None:
+                _OCR_CACHE["manga_ocr"] = MangaOcr()
+            mocr = _OCR_CACHE["manga_ocr"]
+    except Exception as exc:
+        error_message = (
+            f"OCR provider '{selected_ocr}' failed to initialize: {exc}\n"
+            "For PaddleOCR-VL, set PADDLEOCR_VL_MODEL_PATH, PADDLEOCR_VL_MMPROJ_PATH, "
+            "and LLAMA_CPP_DIR or PADDLEOCR_VL_SERVER_URL."
+        )
+        return error_message, 500
     
     # Initialize font analyzer for auto font matching
     font_analyzer = None

@@ -1,4 +1,12 @@
 # OCR modules
-from .chrome_lens_ocr import ChromeLensOCR
+try:
+    from .chrome_lens_ocr import ChromeLensOCR
+except Exception:
+    ChromeLensOCR = None
 
-__all__ = ["ChromeLensOCR"]
+try:
+    from .paddleocr_vl_ocr import PaddleOCRVLOCR
+except Exception:
+    PaddleOCRVLOCR = None
+
+__all__ = ["ChromeLensOCR", "PaddleOCRVLOCR"]

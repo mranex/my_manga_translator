@@ -24,3 +24,4 @@ easyocr
 surya-ocr
 PyQt6
 transformers==4.57.3
+requests>=2.31.0
