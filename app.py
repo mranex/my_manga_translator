@@ -122,6 +122,19 @@ def get_lama_manga_inpainter():
     return _INPAINTER_CACHE["lama_manga"]
 
 
+def get_paddleocr_vl_ocr(source_language=None):
+    if (
+        _OCR_CACHE["paddleocr_vl"] is None
+        or getattr(_OCR_CACHE["paddleocr_vl"], "configured_source_language", None) != source_language
+    ):
+        from ocr.paddleocr_vl_ocr import PaddleOCRVLOCR
+
+        _OCR_CACHE["paddleocr_vl"] = PaddleOCRVLOCR(
+            source_language=source_language,
+        )
+    return _OCR_CACHE["paddleocr_vl"]
+
+
 def bbox_area(bbox):
     x1, y1, x2, y2 = [int(value) for value in bbox]
     return max(0, x2 - x1) * max(0, y2 - y1)
@@ -1105,11 +1118,7 @@ def upload_file():
             mocr = _OCR_CACHE["chrome_lens"]
 
         elif selected_ocr == "paddleocr-vl":
-            if _OCR_CACHE["paddleocr_vl"] is None:
-                from ocr.paddleocr_vl_ocr import PaddleOCRVLOCR
-
-                _OCR_CACHE["paddleocr_vl"] = PaddleOCRVLOCR()
-            mocr = _OCR_CACHE["paddleocr_vl"]
+            mocr = get_paddleocr_vl_ocr(source_language=source_lang)
             print("Using PaddleOCR-VL via llama.cpp")
             print(f"PaddleOCR-VL server: {mocr.server_url}")
 

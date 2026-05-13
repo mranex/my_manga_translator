@@ -19,5 +19,5 @@ torchvision==0.15.2
 sentencepiece==0.2.0
 chrome-lens-py>=3.0.0
 google-genai
-transformers==4.57.3
+transformers
 requests>=2.31.0

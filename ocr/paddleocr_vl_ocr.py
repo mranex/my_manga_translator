@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -27,16 +28,78 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8088
 DEFAULT_TIMEOUT = 120
 DEFAULT_CTX = 4096
-DEFAULT_MAX_NEW_TOKENS = 2048
+DEFAULT_TASK_PREFIX = "OCR"
+DEFAULT_MAX_NEW_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_PROMPT = "OCR: "
-DEFAULT_MIN_SHORT_SIDE = 512
-DEFAULT_MAX_LONG_SIDE = 2048
-DEFAULT_IMAGE_PAD = 12
+DEFAULT_REPETITION_PENALTY = 1.05
+DEFAULT_REPEAT_LAST_N = -1
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_MIN_SHORT_SIDE = 432
+DEFAULT_MAX_LONG_SIDE = 1024
+DEFAULT_IMAGE_PAD = 6
+OCR_REPEAT_MAX_UNIT_CHARS = 12
+OCR_REPEAT_MIN_REPETITIONS = 4
+OCR_REPEAT_MIN_TOTAL_CHARS = 12
 
 
 class PaddleOCRVLError(RuntimeError):
     pass
+
+
+def normalize_ocr_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+
+    cleaned = str(language).strip()
+    if not cleaned:
+        return None
+
+    normalized = cleaned.lower()
+    if normalized in {"auto", "unknown", "none", "null"}:
+        return None
+
+    alias_map = {
+        "en": "English",
+        "eng": "English",
+        "english": "English",
+        "ja": "Japanese",
+        "jpn": "Japanese",
+        "japanese": "Japanese",
+        "ko": "Korean",
+        "kor": "Korean",
+        "korean": "Korean",
+        "zh": "Chinese",
+        "chi": "Chinese",
+        "zho": "Chinese",
+        "chinese": "Chinese",
+        "simplified chinese": "Chinese",
+        "traditional chinese": "Chinese",
+        "vi": "Vietnamese",
+        "vie": "Vietnamese",
+        "vietnamese": "Vietnamese",
+        "fr": "French",
+        "french": "French",
+        "de": "German",
+        "german": "German",
+        "es": "Spanish",
+        "spanish": "Spanish",
+        "th": "Thai",
+        "thai": "Thai",
+        "ru": "Russian",
+        "russian": "Russian",
+    }
+    if normalized in alias_map:
+        return alias_map[normalized]
+
+    tokens = re.split(r"[\s_-]+", cleaned)
+    return " ".join(token[:1].upper() + token[1:] for token in tokens if token)
+
+
+def build_paddleocr_vl_prompt(source_language: str | None = None) -> str:
+    language = normalize_ocr_language(source_language)
+    if language:
+        return f"{DEFAULT_TASK_PREFIX} {language}:"
+    return f"{DEFAULT_TASK_PREFIX}:"
 
 
 def clean_paddleocr_vl_output(text: str) -> str:
@@ -83,6 +146,95 @@ def clean_paddleocr_vl_output(text: str) -> str:
     lines = [line.strip() for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     lines = [" ".join(line.split()) for line in lines if line.strip()]
     return "\n".join(lines).strip()
+
+
+def repeated_ocr_suffix_start(text: str) -> int | None:
+    cleaned = str(text or "")
+    non_space_chars = []
+    non_space_indices = []
+    for index, char in enumerate(cleaned):
+        if char.isspace():
+            continue
+        non_space_chars.append(char)
+        non_space_indices.append(index)
+
+    condensed = "".join(non_space_chars)
+    if len(condensed) < OCR_REPEAT_MIN_TOTAL_CHARS:
+        return None
+
+    best_start = None
+    max_unit = min(OCR_REPEAT_MAX_UNIT_CHARS, len(condensed) // OCR_REPEAT_MIN_REPETITIONS)
+    for unit_length in range(1, max_unit + 1):
+        unit = condensed[-unit_length:]
+        repetitions = 1
+        start_index = len(condensed) - unit_length
+
+        while start_index - unit_length >= 0:
+            candidate = condensed[start_index - unit_length:start_index]
+            if candidate != unit:
+                break
+            repetitions += 1
+            start_index -= unit_length
+
+        total_chars = repetitions * unit_length
+        if repetitions < OCR_REPEAT_MIN_REPETITIONS or total_chars < OCR_REPEAT_MIN_TOTAL_CHARS:
+            continue
+
+        original_start = non_space_indices[start_index]
+        if best_start is None or original_start < best_start:
+            best_start = original_start
+
+    return best_start
+
+
+def trim_repeated_ocr_output(text: str) -> tuple[str, bool]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return "", False
+
+    repeat_start = repeated_ocr_suffix_start(cleaned)
+    if repeat_start is None:
+        return cleaned, False
+
+    trimmed = cleaned[:repeat_start].strip()
+    return trimmed, True
+
+
+def is_degenerate_ocr_output(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+
+    compact = "".join(char for char in cleaned if not char.isspace())
+    if len(compact) < OCR_REPEAT_MIN_TOTAL_CHARS:
+        return False
+
+    unique_chars = set(compact)
+    if len(unique_chars) <= 2:
+        return True
+
+    trimmed, had_repeat = trim_repeated_ocr_output(cleaned)
+    if had_repeat and not trimmed:
+        return True
+
+    if had_repeat and len(compact) >= 18:
+        return True
+
+    diversity = len(unique_chars) / max(1, len(compact))
+    return len(compact) >= 24 and diversity < 0.18
+
+
+def _candidate_score(text: str) -> tuple[int, int]:
+    compact = "".join(char for char in str(text or "") if not char.isspace())
+    return (len(compact), len(set(compact)))
+
+
+def _prefer_candidate(current: str, candidate: str) -> str:
+    if not candidate:
+        return current
+    if not current:
+        return candidate
+    return candidate if _candidate_score(candidate) > _candidate_score(current) else current
 
 
 def _default_model_dir() -> Path:
@@ -236,6 +388,10 @@ class PaddleOCRVLOCR:
         max_long_side: int | None = None,
         image_pad: int | None = None,
         prompt: str | None = None,
+        source_language: str | None = None,
+        repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
+        repeat_last_n: int = DEFAULT_REPEAT_LAST_N,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ):
         self.server_url = (
             (server_url or os.environ.get("PADDLEOCR_VL_SERVER_URL") or f"http://{host}:{port}")
@@ -252,15 +408,22 @@ class PaddleOCRVLOCR:
         self.temperature = float(temperature)
         self.num_ctx = int(num_ctx)
         self.gpu_layers = gpu_layers
+        self.repetition_penalty = float(repetition_penalty)
+        self.repeat_last_n = int(repeat_last_n)
+        self.max_retries = max(1, int(max_retries))
         self._server_process: subprocess.Popen[str] | None = None
         self._server_started_here = False
         self._server_command: list[str] | None = None
         self._cli_command: list[str] | None = None
 
+        self.configured_source_language = source_language
+        self.source_language = normalize_ocr_language(
+            source_language if source_language is not None else os.environ.get("PADDLEOCR_VL_SOURCE_LANGUAGE")
+        )
         self.prompt = (
-        prompt
-        or os.environ.get("PADDLEOCR_VL_PROMPT")
-        or DEFAULT_PROMPT
+            prompt
+            or os.environ.get("PADDLEOCR_VL_PROMPT")
+            or build_paddleocr_vl_prompt(self.source_language)
         )
 
         self.min_short_side = int(
@@ -461,14 +624,18 @@ class PaddleOCRVLOCR:
             "Timed out waiting for PaddleOCR-VL llama.cpp server to become ready."
         )
 
-    def _chat_completion(self, image) -> str:
+    def _chat_completion(self, image, *, max_new_tokens: int | None = None) -> str:
         self.ensure_llama_server_running()
         requests = self._requests()
         image_b64 = self._image_to_base64_png(image)
+        token_limit = int(max_new_tokens if max_new_tokens is not None else self.max_new_tokens)
         payload = {
             "model": "paddleocr-vl",
             "temperature": self.temperature,
-            "max_tokens": self.max_new_tokens,
+            "max_tokens": token_limit,
+            "repeat_penalty": self.repetition_penalty,
+            "repeat_last_n": self.repeat_last_n,
+            "repetition_penalty": self.repetition_penalty,
             "messages": [
                 {
                     "role": "user",
@@ -477,7 +644,7 @@ class PaddleOCRVLOCR:
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{image_b64}"},
                         },
-                        {"type": "text", "text": DEFAULT_PROMPT},
+                        {"type": "text", "text": self.prompt},
                     ],
                 }
             ],
@@ -489,7 +656,7 @@ class PaddleOCRVLOCR:
             timeout=self.timeout,
         )
         if response.status_code == 404:
-            return self._legacy_completion(image_b64)
+            return self._legacy_completion(image_b64, max_new_tokens=token_limit)
         if response.status_code >= 400:
             raise PaddleOCRVLError(
                 "PaddleOCR-VL server request failed: "
@@ -497,13 +664,16 @@ class PaddleOCRVLOCR:
             )
         return _chat_completion_content(response.json())
 
-    def _legacy_completion(self, image_b64: str) -> str:
+    def _legacy_completion(self, image_b64: str, *, max_new_tokens: int | None = None) -> str:
         requests = self._requests()
+        token_limit = int(max_new_tokens if max_new_tokens is not None else self.max_new_tokens)
         payload = {
-            "prompt": DEFAULT_PROMPT,
+            "prompt": self.prompt,
             "image_data": image_b64,
-            "n_predict": self.max_new_tokens,
+            "n_predict": token_limit,
             "temperature": self.temperature,
+            "repeat_penalty": self.repetition_penalty,
+            "repeat_last_n": self.repeat_last_n,
         }
         response = requests.post(
             f"{self.server_url}/completion",
@@ -521,7 +691,7 @@ class PaddleOCRVLOCR:
             raise PaddleOCRVLError("Invalid legacy llama.cpp OCR response payload")
         return clean_paddleocr_vl_output(content)
 
-    def _recognize_via_cli(self, image) -> str:
+    def _recognize_via_cli(self, image, *, max_new_tokens: int | None = None) -> str:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
         try:
@@ -547,22 +717,63 @@ class PaddleOCRVLOCR:
             except Exception:
                 pass
 
-    def recognize(self, image) -> str:
-        pil_image = self._normalize_image(image)
-        width, height = pil_image.size
-        if width <= 1 or height <= 1:
-            return ""
-
+    def _recognize_once(self, pil_image: Image.Image, *, max_new_tokens: int | None = None) -> str:
         try:
-            return self._chat_completion(pil_image)
+            return self._chat_completion(pil_image, max_new_tokens=max_new_tokens)
         except PaddleOCRVLError:
             if self.auto_start_server and self._has_cli_fallback():
-                return self._recognize_via_cli(pil_image)
+                return self._recognize_via_cli(pil_image, max_new_tokens=max_new_tokens)
             raise
         except Exception:
             if not self.auto_start_server:
                 raise
-            return self._recognize_via_cli(pil_image)
+            return self._recognize_via_cli(pil_image, max_new_tokens=max_new_tokens)
+
+    def _recognize_with_retries(self, image, *, logger=None, item_label: str | None = None) -> tuple[str, str]:
+        pil_image = self._normalize_image(image)
+        width, height = pil_image.size
+        if width <= 1 or height <= 1:
+            return "", "EMPTY"
+
+        best_trimmed_candidate = ""
+        best_fallback_candidate = ""
+
+        for attempt in range(1, self.max_retries + 1):
+            request_max_tokens = (
+                self.max_new_tokens
+                if attempt == 1
+                else min(self.max_new_tokens, 128)
+            )
+            raw_text = self._recognize_once(pil_image, max_new_tokens=request_max_tokens)
+            cleaned = clean_paddleocr_vl_output(raw_text)
+            trimmed, had_repeat = trim_repeated_ocr_output(cleaned)
+            degenerate = is_degenerate_ocr_output(cleaned)
+
+            if cleaned:
+                best_fallback_candidate = _prefer_candidate(best_fallback_candidate, cleaned)
+            if had_repeat and trimmed:
+                best_trimmed_candidate = _prefer_candidate(best_trimmed_candidate, trimmed)
+
+            if cleaned and not had_repeat and not degenerate:
+                return cleaned, "OK"
+
+            if logger and item_label and attempt < self.max_retries:
+                if not cleaned:
+                    logger(f"  [{item_label}] RETRY {attempt}/{self.max_retries}: empty OCR output")
+                elif had_repeat:
+                    logger(f"  [{item_label}] RETRY {attempt}/{self.max_retries}: repeated OCR output")
+                elif degenerate:
+                    logger(f"  [{item_label}] RETRY {attempt}/{self.max_retries}: degenerate OCR output")
+
+        if best_trimmed_candidate:
+            return best_trimmed_candidate, "LOOP_TRIMMED"
+        if best_fallback_candidate:
+            return best_fallback_candidate, "BEST_EFFORT"
+        return "", "EMPTY"
+
+    def recognize(self, image) -> str:
+        text, _status = self._recognize_with_retries(image)
+        return text
 
     def process_batch(self, images, max_workers: int = 1) -> list[str]:
         if images is None:
@@ -582,15 +793,25 @@ class PaddleOCRVLOCR:
         results: list[str] = []
         for index, image in enumerate(images, start=1):
             try:
-                text = self.recognize(image)
+                text, status = self._recognize_with_retries(
+                    image,
+                    logger=print,
+                    item_label=f"Text Item {index}",
+                )
             except Exception as exc:
                 print(f"  [Text Item {index}] ERROR: {exc}")
                 results.append("")
                 continue
 
-            if text:
+            if text and status == "OK":
                 preview = text[:50].replace("\n", " ") + ("..." if len(text) > 50 else "")
                 print(f"  [Text Item {index}] OK: {preview}")
+            elif text and status == "LOOP_TRIMMED":
+                preview = text[:50].replace("\n", " ") + ("..." if len(text) > 50 else "")
+                print(f"  [Text Item {index}] LOOP_TRIMMED: {preview}")
+            elif text:
+                preview = text[:50].replace("\n", " ") + ("..." if len(text) > 50 else "")
+                print(f"  [Text Item {index}] BEST_EFFORT: {preview}")
             else:
                 print(f"  [Text Item {index}] EMPTY (no text detected)")
             results.append(text)
@@ -612,5 +833,11 @@ class PaddleOCRVLOCR:
 __all__ = [
     "PaddleOCRVLError",
     "PaddleOCRVLOCR",
+    "DEFAULT_MAX_NEW_TOKENS",
+    "build_paddleocr_vl_prompt",
     "clean_paddleocr_vl_output",
+    "is_degenerate_ocr_output",
+    "normalize_ocr_language",
+    "repeated_ocr_suffix_start",
+    "trim_repeated_ocr_output",
 ]
