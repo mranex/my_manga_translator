@@ -10,12 +10,35 @@ try:
 except ModuleNotFoundError:
     np = None
 
-from .base import LayoutRegion
+from .base import LayoutRegion, TextRegion
 from .matching import bbox_iou
-from .runtime_utils import clamp_bbox_to_image
+from .runtime_utils import clamp_bbox_to_image, expand_bbox
 
 
 MODEL_ID = "PaddlePaddle/PP-DocLayoutV3_safetensors"
+TEXT_LIKE_LABEL_PARTS = (
+    "text",
+    "title",
+    "paragraph",
+    "caption",
+    "footnote",
+    "number",
+    "header",
+    "footer",
+    "formula",
+    "table",
+)
+FIGURE_LIKE_LABEL_PARTS = (
+    "figure",
+    "image",
+    "background",
+    "photo",
+    "illustration",
+    "chart",
+    "diagram",
+    "graphic",
+    "picture",
+)
 RUNTIME_MODULES = [
     ("torch", "torch"),
     ("transformers", "transformers"),
@@ -315,6 +338,70 @@ def build_layout_rois(
     ]
 
 
+def layout_regions_to_text_regions(
+    layout_regions: Sequence[LayoutRegion],
+    image_shape: Sequence[int],
+    *,
+    confidence_threshold: float = 0.20,
+    padding: int = 4,
+) -> list[TextRegion]:
+    text_regions: list[TextRegion] = []
+    page_height = int(image_shape[0])
+    page_width = int(image_shape[1])
+    page_area = max(page_height * page_width, 1)
+
+    for region in layout_regions:
+        if float(region.score) < float(confidence_threshold):
+            continue
+
+        bbox = expand_bbox(region.bbox, image_shape, padding)
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            continue
+
+        area = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1)
+        area_ratio = area / page_area
+        label = (region.label or "").strip().lower()
+
+        is_text_like = any(part in label for part in TEXT_LIKE_LABEL_PARTS)
+        is_figure_like = any(part in label for part in FIGURE_LIKE_LABEL_PARTS)
+        is_unknown = not label or label in {"unknown", "other", "layout", "full_page"}
+
+        if is_figure_like and area_ratio >= 0.18:
+            continue
+        if label in {"background", "full_page"} and area_ratio >= 0.50:
+            continue
+        if is_unknown and area_ratio >= 0.35:
+            continue
+        if not is_text_like and not is_unknown and area_ratio >= 0.75:
+            continue
+
+        text_regions.append(
+            TextRegion(
+                bbox=bbox,
+                score=region.score,
+                class_id=region.class_id,
+                mask=None,
+                text="",
+                confidence=region.score,
+                bubble_id=None,
+                reading_order=region.reading_order,
+            )
+        )
+
+    return [
+        region
+        for _, region in sorted(
+            enumerate(text_regions),
+            key=lambda item: (
+                item[1].reading_order if item[1].reading_order is not None else 10**9,
+                item[1].bbox[1],
+                item[1].bbox[0],
+                item[0],
+            ),
+        )
+    ]
+
+
 class PPDocLayoutV3Detector:
     def __init__(
         self,
@@ -468,5 +555,6 @@ __all__ = [
     "detect_layout_regions",
     "ensure_pp_doclayout_v3_available",
     "get_pp_doclayout_v3_detector",
+    "layout_regions_to_text_regions",
     "normalize_layout_detections",
 ]

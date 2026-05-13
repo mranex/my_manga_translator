@@ -12,6 +12,7 @@ from detectors.base import BubbleRegion, LayoutRegion, TextRegion
 from detectors.pp_doclayout_v3 import (
     PPDocLayoutV3Detector,
     build_layout_rois,
+    layout_regions_to_text_regions,
     normalize_layout_detections,
 )
 from detectors.runtime_utils import (
@@ -188,6 +189,45 @@ class TestPPDocLayoutNormalization(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0].bbox, (5, 6, 20, 25))
         self.assertEqual(regions[0].label, "text")
+
+
+class TestLayoutRegionsToTextRegions(unittest.TestCase):
+    def test_broad_label_behavior_keeps_text_like_and_unknown_small_regions(self):
+        text_regions = layout_regions_to_text_regions(
+            [
+                LayoutRegion(bbox=(10, 10, 20, 20), label="text", score=0.8, reading_order=3),
+                LayoutRegion(bbox=(25, 12, 35, 24), label="title", score=0.7, reading_order=1),
+                LayoutRegion(bbox=(40, 15, 52, 27), label="caption", score=0.9, reading_order=2),
+                LayoutRegion(bbox=(60, 18, 72, 30), label="unknown", score=0.6, reading_order=4),
+                LayoutRegion(bbox=(0, 0, 95, 95), label="figure", score=0.95, reading_order=5),
+            ],
+            (100, 100, 3),
+            padding=0,
+        )
+
+        self.assertEqual([region.bbox for region in text_regions], [
+            (25, 12, 35, 24),
+            (40, 15, 52, 27),
+            (10, 10, 20, 20),
+            (60, 18, 72, 30),
+        ])
+        self.assertEqual([region.reading_order for region in text_regions], [1, 2, 3, 4])
+
+    def test_invalid_boxes_and_low_confidence_are_skipped(self):
+        text_regions = layout_regions_to_text_regions(
+            [
+                LayoutRegion(bbox=(10, 10, 10, 20), label="text", score=0.8, reading_order=0),
+                LayoutRegion(bbox=(15, 15, 25, 25), label="caption", score=0.1, reading_order=1),
+                LayoutRegion(bbox=(30, 30, 40, 42), label="", score=0.7, reading_order=2),
+            ],
+            (100, 100, 3),
+            confidence_threshold=0.2,
+            padding=0,
+        )
+
+        self.assertEqual(len(text_regions), 1)
+        self.assertEqual(text_regions[0].bbox, (30, 30, 40, 42))
+        self.assertEqual(text_regions[0].reading_order, 2)
 
 
 class TestROIMappingUtilities(unittest.TestCase):

@@ -14,25 +14,32 @@ os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 # Suppress deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 from ocr.easyocr_english import EnglishEasyOCR
-from ocr.paddleocr_english import EnglishPaddleOCR
-from ocr.surya_ocr import SuryaOCR
 from detectors import (
     detect_page_regions,
     detect_page_regions_layout_first,
 )
 from detectors.runtime_utils import (
     bubble_region_to_crop_data,
-    process_bubble_with_mask,
+    clamp_bbox_to_image,
+    expand_bbox,
+    text_region_to_crop_data,
+    union_text_regions_bbox,
+)
+from inpainting import (
+    LamaMangaInpainter,
+    build_bubble_mask,
+    build_text_block_crop_windows,
+    build_text_block_removal_mask,
 )
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
-from add_text import add_text
 from manga_ocr import MangaOcr
 from ocr.chrome_lens_ocr import ChromeLensOCR
 from PIL import Image
 import numpy as np
 import base64
 import cv2
+from text_rendering import choose_text_color_for_region, render_text_block
 
 
 app = Flask(__name__)
@@ -94,15 +101,22 @@ _OCR_CACHE = {
     "paddleocr_en": None,
     "surya_en": None,
 }
+_INPAINTER_CACHE = {
+    "lama_manga": None,
+}
+MAX_INPAINT_REGION_RATIO = 0.35
+INPAINT_BLOCK_PADDING = 8
+RENDER_BLOCK_PADDING = 4
 
-def group_text_regions_by_bubble(text_regions):
+def split_text_regions_by_bubble(text_regions):
     text_regions_by_bubble = {}
+    outside_text_regions = []
     for text_region in text_regions:
         if text_region.bubble_id is None:
-            # TODO: render unmatched outside-bubble text regions in a later lettering pass.
+            outside_text_regions.append(text_region)
             continue
         text_regions_by_bubble.setdefault(text_region.bubble_id, []).append(text_region)
-    return text_regions_by_bubble
+    return text_regions_by_bubble, outside_text_regions
 
 
 def get_first_layout_first_bubble_crop(image):
@@ -116,6 +130,328 @@ def get_first_layout_first_bubble_crop(image):
         (),
     )
     return crop_data["bubble_crop"]
+
+
+def get_lama_manga_inpainter():
+    if _INPAINTER_CACHE["lama_manga"] is None:
+        _INPAINTER_CACHE["lama_manga"] = LamaMangaInpainter()
+    return _INPAINTER_CACHE["lama_manga"]
+
+
+def bbox_area(bbox):
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def is_huge_inpaint_bbox(bbox, image_shape, max_region_ratio=MAX_INPAINT_REGION_RATIO):
+    if bbox is None:
+        return False
+    page_area = max(1, int(image_shape[0]) * int(image_shape[1]))
+    return bbox_area(clamp_bbox_to_image(bbox, image_shape)) > (page_area * float(max_region_ratio))
+
+
+def _select_text_block_bbox(text_regions, image_shape):
+    if not text_regions:
+        return None, False
+
+    candidate_bbox = union_text_regions_bbox(text_regions, image_shape, padding=0)
+    if candidate_bbox is None:
+        return None, False
+    if not is_huge_inpaint_bbox(candidate_bbox, image_shape):
+        return candidate_bbox, False
+
+    smaller_regions = [
+        region
+        for region in text_regions
+        if not is_huge_inpaint_bbox(region.bbox, image_shape)
+    ]
+    if smaller_regions:
+        smaller_bbox = union_text_regions_bbox(smaller_regions, image_shape, padding=0)
+        if smaller_bbox is not None and not is_huge_inpaint_bbox(smaller_bbox, image_shape):
+            return smaller_bbox, True
+    return None, True
+
+
+def _select_item_inpaint_bbox(
+    image_shape,
+    *,
+    primary_bbox=None,
+    fallback_bbox=None,
+    block_padding=INPAINT_BLOCK_PADDING,
+):
+    huge_region_skipped = False
+    if primary_bbox is not None:
+        padded_primary = expand_bbox(primary_bbox, image_shape, block_padding)
+        if not is_huge_inpaint_bbox(padded_primary, image_shape):
+            return padded_primary, False, False
+        huge_region_skipped = True
+
+    if fallback_bbox is not None:
+        clamped_fallback = expand_bbox(
+            clamp_bbox_to_image(fallback_bbox, image_shape),
+            image_shape,
+            max(4, int(block_padding) // 2),
+        )
+        if not is_huge_inpaint_bbox(clamped_fallback, image_shape):
+            return clamped_fallback, huge_region_skipped, True
+
+    return None, huge_region_skipped, True
+
+
+def conservative_inner_text_bbox(bbox, image_shape, width_ratio=0.72, height_ratio=0.52):
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    center_x = x1 + (width / 2.0)
+    center_y = y1 + (height / 2.0)
+    inner_width = max(12, int(round(width * width_ratio)))
+    inner_height = max(12, int(round(height * height_ratio)))
+    return expand_bbox(
+        (
+            int(round(center_x - (inner_width / 2.0))),
+            int(round(center_y - (inner_height / 2.0))),
+            int(round(center_x + (inner_width / 2.0))),
+            int(round(center_y + (inner_height / 2.0))),
+        ),
+        image_shape,
+        0,
+    )
+
+
+def gather_render_item_text_regions(render_items):
+    text_regions = []
+    for render_item in render_items:
+        text_regions.extend(render_item.get("text_regions") or [])
+        if (
+            render_item.get("kind") == "outside_text"
+            and render_item.get("text_region") is not None
+            and not render_item.get("text_regions")
+        ):
+            text_regions.append(render_item["text_region"])
+    return text_regions
+
+
+def render_item_sort_key(render_item, original_index):
+    reading_order = render_item.get("reading_order")
+    render_bbox = render_item.get("render_bbox") or render_item.get("coords") or (0, 0, 0, 0)
+    return (
+        reading_order if reading_order is not None else 10**9,
+        int(render_bbox[1]),
+        int(render_bbox[0]),
+        original_index,
+    )
+
+
+def finalize_page_translation(image, render_items, translated_texts, font_path):
+    if not render_items:
+        return image.copy()
+
+    page_image = image.copy()
+    for render_item, translated_text in zip(render_items, translated_texts):
+        render_item["translated_text"] = translated_text
+
+    text_mask = build_text_block_removal_mask(page_image.shape, render_items)
+    bubble_mask = build_bubble_mask(page_image.shape, render_items)
+    crop_windows = build_text_block_crop_windows(render_items, page_image.shape)
+    text_regions = gather_render_item_text_regions(render_items)
+    if VERBOSE_LOG:
+        page_pixels = max(1, int(page_image.shape[0]) * int(page_image.shape[1]))
+        masked_pixels = int(np.count_nonzero(text_mask))
+        block_inpaint_boxes = sum(1 for item in render_items if item.get("inpaint_bbox") is not None)
+        fallback_boxes = sum(1 for item in render_items if item.get("inpaint_fallback_used"))
+        huge_regions_skipped = sum(1 for item in render_items if item.get("huge_region_skipped"))
+        log(
+            "LaMa page prep: "
+            f"{len(render_items)} render items, "
+            f"{block_inpaint_boxes} block inpaint boxes, "
+            f"{masked_pixels}/{page_pixels} masked pixels, "
+            f"{len(crop_windows)} crop windows, "
+            f"{fallback_boxes} fallback inner-bbox masks, "
+            f"{huge_regions_skipped} huge regions skipped"
+        )
+
+    try:
+        final_image = get_lama_manga_inpainter().inpaint(
+            page_image,
+            text_mask,
+            bubble_mask=bubble_mask,
+            text_regions=text_regions,
+            crop_windows=crop_windows,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"LaMa Manga inpainting failed: {exc}") from exc
+    background_reference = final_image.copy()
+
+    for render_item in render_items:
+        translated_text = render_item.get("translated_text", "")
+        if not translated_text or not translated_text.strip():
+            continue
+
+        render_bbox = render_item["render_bbox"]
+        color_mask = None
+        if render_item.get("kind") == "outside_text" and render_item.get("text_region") is not None:
+            color_mask = render_item["text_region"].mask
+        elif render_item.get("text_regions"):
+            first_mask_region = next(
+                (region for region in render_item["text_regions"] if getattr(region, "mask", None) is not None),
+                None,
+            )
+            color_mask = None if first_mask_region is None else first_mask_region.mask
+        elif render_item.get("bubble_region") is not None:
+            color_mask = render_item["bubble_region"].mask
+
+        text_color, stroke_color, stroke_width = choose_text_color_for_region(
+            background_reference,
+            render_bbox,
+            mask=color_mask,
+        )
+
+        bubble_region = render_item.get("bubble_region")
+        if bubble_region is not None:
+            if bubble_region.is_dark:
+                text_color = (255, 255, 255)
+                stroke_color = (0, 0, 0)
+                stroke_width = max(1, stroke_width or 1)
+            else:
+                text_color = (0, 0, 0)
+                stroke_color = (255, 255, 255)
+                stroke_width = max(1, stroke_width or 1)
+        elif render_item.get("kind") == "outside_text":
+            stroke_color = (0, 0, 0) if text_color == (255, 255, 255) else (255, 255, 255)
+            stroke_width = max(1, stroke_width or 1)
+
+        render_text_block(
+            final_image,
+            translated_text,
+            render_bbox,
+            font_path,
+            text_color,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            align="center",
+            vertical=False,
+            padding=2,
+            supersample=3,
+        )
+
+    return final_image
+
+
+def build_bubble_render_item(image, bubble_region, matched_text_regions):
+    crop_data = bubble_region_to_crop_data(
+        image,
+        bubble_region,
+        matched_text_regions,
+    )
+    bubble_bbox = crop_data["bubble_bbox"]
+    ocr_crop = crop_data["ocr_crop"].copy()
+    text_block_bbox, huge_region_skipped = _select_text_block_bbox(
+        matched_text_regions,
+        image.shape,
+    )
+    fallback_inner_bbox = conservative_inner_text_bbox(bubble_bbox, image.shape)
+    if text_block_bbox is not None:
+        render_bbox = expand_bbox(text_block_bbox, image.shape, RENDER_BLOCK_PADDING)
+    else:
+        render_bbox = fallback_inner_bbox
+    inpaint_bbox, huge_region_skipped, inpaint_fallback_used = _select_item_inpaint_bbox(
+        image.shape,
+        primary_bbox=text_block_bbox,
+        fallback_bbox=fallback_inner_bbox,
+    )
+    reading_orders = [
+        region.reading_order
+        for region in matched_text_regions
+        if region.reading_order is not None
+    ]
+    reading_order = min(reading_orders) if reading_orders else None
+    if inpaint_fallback_used:
+        log(
+            "No text block found for bubble; using fallback bubble inner bbox "
+            f"for inpaint at {bubble_bbox}"
+        )
+
+    return {
+        "kind": "bubble",
+        "bubble_region": bubble_region,
+        "text_regions": list(matched_text_regions),
+        "coords": bubble_bbox,
+        "render_bbox": render_bbox,
+        "inpaint_bbox": inpaint_bbox,
+        "ocr_bbox": crop_data["ocr_bbox"],
+        "ocr_crop": ocr_crop,
+        "fallback_text_bbox": fallback_inner_bbox,
+        "reading_order": reading_order,
+        "inpaint_fallback_used": inpaint_fallback_used,
+        "huge_region_skipped": huge_region_skipped,
+    }
+
+
+def build_outside_text_render_item(image, text_region, padding=6):
+    crop_data = text_region_to_crop_data(
+        image,
+        text_region,
+        padding=padding,
+    )
+    region_bbox = crop_data["region_bbox"]
+    ocr_crop = crop_data["ocr_crop"].copy()
+    raw_bbox = clamp_bbox_to_image(text_region.bbox, image.shape)
+    huge_region_skipped = is_huge_inpaint_bbox(raw_bbox, image.shape)
+    render_padding = 0 if huge_region_skipped else 2
+    render_bbox = expand_bbox(raw_bbox, image.shape, render_padding)
+    inpaint_bbox, huge_region_skipped, inpaint_fallback_used = _select_item_inpaint_bbox(
+        image.shape,
+        primary_bbox=raw_bbox,
+        fallback_bbox=None,
+    )
+    if huge_region_skipped and inpaint_bbox is None:
+        log(
+            "Skipping huge outside-text inpaint bbox "
+            f"at {raw_bbox}; will only use any available region mask refinement"
+        )
+
+    return {
+        "kind": "outside_text",
+        "text_region": text_region,
+        "text_regions": [text_region],
+        "coords": region_bbox,
+        "render_bbox": render_bbox,
+        "inpaint_bbox": inpaint_bbox,
+        "ocr_bbox": crop_data["ocr_bbox"],
+        "ocr_crop": ocr_crop,
+        "reading_order": text_region.reading_order,
+        "inpaint_fallback_used": inpaint_fallback_used,
+        "huge_region_skipped": huge_region_skipped,
+    }
+
+
+def collect_page_render_items(image, page_detection_result):
+    text_regions_by_bubble, outside_text_regions = split_text_regions_by_bubble(
+        page_detection_result.text_regions
+    )
+
+    render_items = []
+    for bubble_idx, bubble_region in enumerate(page_detection_result.bubbles):
+        render_items.append(
+            build_bubble_render_item(
+                image,
+                bubble_region,
+                text_regions_by_bubble.get(bubble_idx, []),
+            )
+        )
+
+    for text_region in outside_text_regions:
+        render_items.append(build_outside_text_render_item(image, text_region))
+
+    render_items = [
+        item
+        for index, item in sorted(
+            enumerate(render_items),
+            key=lambda entry: render_item_sort_key(entry[1], entry[0]),
+        )
+    ]
+
+    return render_items, text_regions_by_bubble, outside_text_regions
 
 def split_long_image(image: np.ndarray, max_height_ratio: float = DEFAULT_SPLIT_HEIGHT_RATIO) -> list:
     """
@@ -169,53 +505,17 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     Supports auto font matching when font_analyzer is provided and selected_font is 'auto'.
     """
     page_detection_result = detect_page_regions_layout_first(image)
-    bubble_regions = page_detection_result.bubbles
-    text_regions_by_bubble = group_text_regions_by_bubble(
-        page_detection_result.text_regions
-    )
-    
-    if not bubble_regions:
+    render_items, _, _ = collect_page_render_items(image, page_detection_result)
+
+    if not render_items:
         return image
     
-    # Phase 1: Collect all bubble data and OCR texts
-    bubble_data = []
+    # Phase 1: Collect all render item data and OCR texts
     texts_to_translate = []
-    first_bubble_image = None  # For font analysis
-    
-    for bubble_idx, bubble_region in enumerate(bubble_regions):
-        crop_data = bubble_region_to_crop_data(
-            image,
-            bubble_region,
-            text_regions_by_bubble.get(bubble_idx, []),
-        )
-        bubble_bbox = crop_data["bubble_bbox"]
-        x1, y1, x2, y2 = bubble_bbox
-        detected_image = crop_data["bubble_crop"]
-        mask_crop = crop_data["mask_crop"]
-        ocr_crop = crop_data["ocr_crop"]
-        
-        # Save first bubble for font analysis (before processing)
-        if first_bubble_image is None:
-            first_bubble_image = detected_image.copy()
-        
-        # Fix: detected_image is already uint8, no need to multiply by 255
-        im = Image.fromarray(ocr_crop.copy())
+
+    for render_item in render_items:
+        im = Image.fromarray(render_item["ocr_crop"])
         text = mocr(im)
-        
-        detected_image, cont, bubble_is_dark, detected_color = process_bubble_with_mask(
-            detected_image,
-            mask_crop,
-            force_dark=bubble_region.is_dark,
-        )
-        bubble_region.fill_color = detected_color
-        
-        bubble_data.append({
-            'detected_image': detected_image,
-            'contour': cont,
-            'coords': (x1, y1, x2, y2),
-            'is_dark': bubble_is_dark,
-            'fill_color': detected_color
-        })
         texts_to_translate.append(text)
     
     # Phase 2: Batch translate
@@ -300,15 +600,8 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
         # Optimized: Use batch translation if available (e.g. for NLLB)
         translated_texts = manga_translator.translate_batch(texts_to_translate, method=selected_translator)
     
-    # Phase 3: Add translated text to bubbles
-    # Determine correct font path based on font name
     font_path = get_font_path(selected_font)
-    for data, translated_text in zip(bubble_data, translated_texts):
-        # Use white text for dark bubbles, black text for light bubbles
-        text_color = (255, 255, 255) if data.get('is_dark', False) else (0, 0, 0)
-        add_text(data['detected_image'], translated_text, font_path, data['contour'], text_color)
-    
-    return image
+    return finalize_page_translation(image, render_items, translated_texts, font_path)
 
 
 def get_font_path(font_name: str) -> str:
@@ -341,7 +634,6 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         List of processed images with translations applied
     """
     import time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     
     def emit_progress(phase, current, total, message):
         """Emit progress update via WebSocket."""
@@ -353,7 +645,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                 'message': message,
                 'percent': int((current / max(total, 1)) * 100)
             })
-        except Exception as e:
+        except Exception:
             pass  # Silently fail if socket not connected
     
     total_images = len(images_data)
@@ -364,101 +656,88 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     # Check if using Chrome Lens OCR (has batch support)
     use_batch_ocr = hasattr(mocr, 'process_batch')
     
-    # Phase 1a: Detect bubbles and collect all bubble images
-    print("\n[Phase 1] Detecting bubbles...")
-    emit_progress('detection', 0, total_images, 'Bắt đầu phát hiện speech bubbles...')
-    all_pages_data = {}  # {page_name: {'image': img, 'bubbles': [...], 'bubble_images': [...]}}
-    all_bubble_images = []  # Flat list for batch OCR
-    bubble_mapping = []  # [(page_name, bubble_idx), ...] to map back
+    # Phase 1a: Detect page regions and collect all OCR items
+    print("\n[Phase 1] Detecting page regions...")
+    emit_progress('detection', 0, total_images, 'Starting page analysis...')
+
+    all_pages_data = {}
+    all_ocr_images = []
+    ocr_mapping = []
+    total_bubbles = 0
+    total_outside_text_regions = 0
     
     for idx, img_data in enumerate(images_data):
         image = img_data['image']
         name = img_data['name']
         
-        emit_progress('detection', idx + 1, total_images, f'Phát hiện bubbles: {name}')
+
+        emit_progress('detection', idx + 1, total_images, f'Analyzing page: {name}')
         print(f"  [{idx+1}/{total_images}] {name}", end="", flush=True)
         
         page_detection_result = detect_page_regions_layout_first(image)
-        bubble_regions = page_detection_result.bubbles
-        text_regions_by_bubble = group_text_regions_by_bubble(
-            page_detection_result.text_regions
+        render_items, _, outside_text_regions = collect_page_render_items(
+            image,
+            page_detection_result,
         )
-        if not bubble_regions:
-            all_pages_data[name] = {'image': image, 'bubbles': [], 'texts': []}
-            print(f" - 0 bubbles")
-            continue
-        
-        print(f" - {len(bubble_regions)} bubbles")
-        
-        bubble_data = []
-        
-        for bubble_idx, bubble_region in enumerate(bubble_regions):
-            crop_data = bubble_region_to_crop_data(
-                image,
-                bubble_region,
-                text_regions_by_bubble.get(bubble_idx, []),
-            )
-            bubble_bbox = crop_data["bubble_bbox"]
-            x1, y1, x2, y2 = bubble_bbox
-            detected_image = crop_data["bubble_crop"]
-            mask_crop = crop_data["mask_crop"]
-            ocr_crop = crop_data["ocr_crop"]
-            
-            # IMPORTANT: Add to OCR queue BEFORE processing (which fills white/black)
-            all_bubble_images.append(Image.fromarray(ocr_crop.copy()))
-            bubble_mapping.append((name, bubble_idx))
-            
-            processed_image, cont, bubble_is_dark, detected_color = process_bubble_with_mask(
-                detected_image,
-                mask_crop,
-                force_dark=bubble_region.is_dark,
-            )
-            bubble_region.fill_color = detected_color
-            
-            bubble_data.append({
-                'bubble_region': bubble_region,
-                'detected_image': processed_image,
-                'contour': cont,
-                'coords': (x1, y1, x2, y2),
-                'mask_crop': mask_crop,
-                'is_dark': bubble_is_dark,
-                'fill_color': detected_color
-            })
-        
+        bubble_count = sum(1 for item in render_items if item["kind"] == "bubble")
+        outside_count = len(outside_text_regions)
+        total_bubbles += bubble_count
+        total_outside_text_regions += outside_count
+
         all_pages_data[name] = {
             'image': image,
-            'bubbles': bubble_data,
-            'texts': []  # Will fill after OCR
+            'render_items': render_items,
+            'texts': []
         }
+
+        print(f" - {bubble_count} bubbles, {outside_count} outside text regions")
+
+        for item_idx, render_item in enumerate(render_items):
+            all_ocr_images.append(Image.fromarray(render_item["ocr_crop"]))
+            ocr_mapping.append((name, item_idx))
     
+    total_text_items = len(all_ocr_images)
     detection_time = time.time() - start_time
-    print(f"✓ Bubble detection completed in {detection_time:.1f}s ({len(all_bubble_images)} total bubbles)")
-    emit_progress('detection', total_images, total_images, f'Phát hiện xong {len(all_bubble_images)} bubbles')
+    print(
+        f"Detected {total_bubbles} bubbles and {total_outside_text_regions} outside text regions "
+        f"({total_text_items} total text items)"
+    )
+    emit_progress(
+        'detection',
+        total_images,
+        total_images,
+        f'Detected {total_bubbles} bubbles and {total_outside_text_regions} outside text regions',
+    )
+    print(f"Page analysis completed in {detection_time:.1f}s ({total_text_items} text items)")
+
     
-    # Phase 1b: Batch OCR all bubbles at once
-    if all_bubble_images:
+    # Phase 1b: Batch OCR all text items at once
+    if all_ocr_images:
         ocr_start = time.time()
-        emit_progress('ocr', 0, 1, f'Đang OCR {len(all_bubble_images)} bubbles...')
-        print(f"\n[Phase 2] OCR processing {len(all_bubble_images)} bubbles...", end=" ", flush=True)
+        print(f"Preparing OCR for {len(all_ocr_images)} text items...", end=" ", flush=True)
+        emit_progress('ocr', 0, 1, f'OCR processing {len(all_ocr_images)} text items...')
+        print(f"\n[Phase 2] OCR processing {len(all_ocr_images)} text items...", end=" ", flush=True)
         
         if use_batch_ocr:
             # Use concurrent batch OCR (Chrome Lens)
-            all_texts = mocr.process_batch(all_bubble_images)
+            all_texts = mocr.process_batch(all_ocr_images)
         else:
             # Sequential OCR (MangaOcr or others)
-            all_texts = [mocr(img) for img in all_bubble_images]
+            all_texts = [mocr(img) for img in all_ocr_images]
         
         # Map texts back to pages
-        for (page_name, bubble_idx), text in zip(bubble_mapping, all_texts):
+        for (page_name, item_idx), text in zip(ocr_mapping, all_texts):
             all_pages_data[page_name]['texts'].append(text)
         
         ocr_time = time.time() - ocr_start
         print(f"({ocr_time:.1f}s)")
-        print(f"✓ OCR completed in {ocr_time:.1f}s ({len(all_bubble_images)/ocr_time:.1f} bubbles/sec)")
-        emit_progress('ocr', 1, 1, f'OCR hoàn tất ({len(all_bubble_images)} bubbles)')
+        print(f"OCR completed for {len(all_ocr_images)} text items")
+        print(f"OCR finished in {ocr_time:.1f}s ({len(all_ocr_images)/max(ocr_time, 1e-6):.1f} text items/sec)")
+        emit_progress('ocr', 1, 1, f'OCR complete ({len(all_ocr_images)} text items)')
     
     # Phase 3: Batch translate all pages together
-    emit_progress('translation', 0, 1, 'Đang dịch...')
+
+    emit_progress('translation', 0, 1, 'Translating text...')
     pages_texts = {name: data['texts'] for name, data in all_pages_data.items() if data['texts']}
     all_translations = {}
     
@@ -521,50 +800,48 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                             all_translations[name] = texts  # Return original on error
     
     translation_time = time.time() - start_time - detection_time
-    print(f"✓ Translation completed in {translation_time:.1f}s")
-    emit_progress('translation', 1, 1, 'Dịch hoàn tất')
+    print(f"Translation completed in {translation_time:.1f}s")
+    emit_progress('translation', 1, 1, 'Translation complete')
     
-    # Phase 4: Apply translations and render text
-    emit_progress('rendering', 0, total_images, 'Đang render text vào ảnh...')
+    # Phase 4: Inpaint page text and render translations
+    emit_progress('rendering', 0, total_images, 'Inpainting pages and rendering translations...')
+
     render_start = time.time()
     processed_results = []
     font_path = get_font_path(selected_font)
     
-    print(f"\n[Phase 4] Rendering text...")
+    print(f"\n[Phase 4] Inpainting pages and rendering translated text...")
     
     render_idx = 0
     for name, data in all_pages_data.items():
         render_idx += 1
-        emit_progress('rendering', render_idx, total_images, f'Render text: {name}')
+        emit_progress('rendering', render_idx, total_images, f'Inpaint and render page: {name}')
         
         image = data['image']
-        bubbles = data['bubbles']
+        render_items = data['render_items']
         translated_texts = all_translations.get(name, data['texts'])  # Fallback to original
-        
-        # Apply text to bubbles on the ORIGINAL image
-        for bubble, text in zip(bubbles, translated_texts):
-            x1, y1, x2, y2 = bubble['coords']
-            # Get the region in the original image (this is a view, modifications affect original)
-            bubble_region = image[y1:y2, x1:x2]
-            # Use white text for dark bubbles, black text for light bubbles
-            text_color = (255, 255, 255) if bubble.get('is_dark', False) else (0, 0, 0)
-            # Add translated text
-            add_text(bubble_region, text, font_path, bubble['contour'], text_color)
-        
+
+        final_image = finalize_page_translation(
+            image,
+            render_items,
+            translated_texts,
+            font_path,
+        )
+
         processed_results.append({
-            'image': image,
+            'image': final_image,
             'name': name
         })
     
     render_time = time.time() - render_start
     total_time = time.time() - start_time
     
-    print(f"✓ Text rendering completed in {render_time:.1f}s")
+    print(f"Inpainting and text rendering completed in {render_time:.1f}s")
     print(f"{'='*50}")
-    print(f"✓ TOTAL: {total_images} images processed in {total_time:.1f}s ({total_time/total_images:.1f}s/image)")
+    print(f"TOTAL: {total_images} images processed in {total_time:.1f}s ({total_time/total_images:.1f}s/image)")
     print(f"{'='*50}\n")
     
-    emit_progress('done', total_images, total_images, f'Hoàn tất! {total_images} ảnh trong {total_time:.1f}s')
+    emit_progress('done', total_images, total_images, f'Completed {total_images} images in {total_time:.1f}s')
     
     return processed_results
 
@@ -649,12 +926,12 @@ def upload_file():
     # Get translation style/custom prompt
     style_map = {
         "default": "",
-        "casual (thân mật)": "casual",
-        "formal (trang trọng)": "formal",
+        "casual (thÃƒÂ¢n mÃ¡ÂºÂ­t)": "casual",
+        "formal (trang trÃ¡Â»Âng)": "formal",
         "keep honorifics (-san, senpai...)": "keep_honorifics",
         "web novel style": "web_novel",
-        "action (ngắn gọn)": "action",
-        "literal (sát nghĩa)": "literal",
+        "action (ngÃ¡ÂºÂ¯n gÃ¡Â»Ân)": "action",
+        "literal (sÃƒÂ¡t nghÃ„Â©a)": "literal",
         "custom...": ""
     }
     selected_style = request.form.get("selected_style", "Default").lower()
@@ -715,6 +992,10 @@ def upload_file():
     
     elif selected_ocr == "paddleocr-english":
         if _OCR_CACHE["paddleocr_en"] is None:
+            try:
+                from ocr.paddleocr_english import EnglishPaddleOCR
+            except Exception as exc:
+                raise RuntimeError(f"PaddleOCR is unavailable in this environment: {exc}") from exc
             _OCR_CACHE["paddleocr_en"] = EnglishPaddleOCR(
                 device="gpu:0",
                 min_score=0.05,
@@ -725,6 +1006,10 @@ def upload_file():
         
     elif selected_ocr == "surya-english":
         if _OCR_CACHE["surya_en"] is None:
+            try:
+                from ocr.surya_ocr import SuryaOCR
+            except Exception as exc:
+                raise RuntimeError(f"Surya OCR is unavailable in this environment: {exc}") from exc
             _OCR_CACHE["surya_en"] = SuryaOCR(
                 min_confidence=0.15,
                 min_side=900,

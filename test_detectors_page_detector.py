@@ -1,7 +1,10 @@
 import unittest
 
 from detectors.base import BubbleRegion, LayoutRegion, TextRegion
-from detectors.page_detector import detect_page_regions_layout_first
+from detectors.page_detector import (
+    detect_page_regions_layout_first,
+    merge_text_region_candidates,
+)
 
 
 class FakeImage:
@@ -9,45 +12,52 @@ class FakeImage:
 
 
 class FakeLayoutDetector:
-    roi_padding = 12
-
     def detect_layout_regions(self, image):
         return [
-            LayoutRegion(bbox=(10, 10, 40, 40), label="caption", reading_order=0),
-            LayoutRegion(bbox=(50, 45, 90, 85), label="figure", reading_order=1),
+            LayoutRegion(bbox=(12, 12, 30, 26), label="caption", score=0.7, reading_order=0),
+            LayoutRegion(bbox=(80, 8, 110, 22), label="unknown", score=0.6, reading_order=1),
+            LayoutRegion(bbox=(0, 0, 120, 100), label="figure", score=0.95, reading_order=2),
         ]
 
 
 class FakeBubbleDetector:
     def __init__(self):
-        self.received_rois = None
+        self.full_page_calls = 0
+        self.roi_calls = 0
+
+    def detect_segmented_bubble_regions(self, image):
+        self.full_page_calls += 1
+        return [
+            BubbleRegion(bbox=(10, 10, 40, 40), score=0.9),
+        ]
 
     def detect_bubble_regions_in_rois(self, image, layout_rois):
-        self.received_rois = list(layout_rois)
-        return [
-            BubbleRegion(bbox=(12, 12, 28, 28), score=0.9),
-            BubbleRegion(bbox=(55, 52, 82, 78), score=0.8),
-        ]
+        self.roi_calls += 1
+        raise AssertionError("Active page detector should not gate bubble detection on PP ROIs")
 
 
-class FakeTextDetector:
-    def __init__(self):
-        self.received_rois = None
+class FakeComicTextDetector:
+    def __init__(self, regions):
+        self._regions = list(regions)
+        self.full_page_calls = 0
+        self.roi_calls = 0
+
+    def detect_text_regions(self, image):
+        self.full_page_calls += 1
+        return list(self._regions)
 
     def detect_text_regions_in_rois(self, image, layout_rois):
-        self.received_rois = list(layout_rois)
-        return [
-            TextRegion(bbox=(13, 13, 24, 24), text="inside first", reading_order=0),
-            TextRegion(bbox=(58, 54, 76, 74), text="inside second", reading_order=1),
-            TextRegion(bbox=(95, 5, 110, 20), text="outside", reading_order=2),
-        ]
+        self.roi_calls += 1
+        raise AssertionError("Active page detector should not gate comic text detection on PP ROIs")
 
 
 class TestPageDetector(unittest.TestCase):
-    def test_layout_first_orchestration_returns_layout_bubbles_and_text(self):
+    def test_active_pipeline_uses_full_page_bubble_and_text_detectors(self):
         image = FakeImage()
         bubble_detector = FakeBubbleDetector()
-        text_detector = FakeTextDetector()
+        text_detector = FakeComicTextDetector(
+            [TextRegion(bbox=(14, 14, 28, 24), confidence=0.95, reading_order=3)]
+        )
 
         result = detect_page_regions_layout_first(
             image,
@@ -58,18 +68,60 @@ class TestPageDetector(unittest.TestCase):
 
         self.assertEqual(
             result.method,
-            "pp_doclayout_v3+yolov8_seg_bubble+comic_text_detector",
+            "pp_doclayout_v3_text_source+yolov8_seg_bubble+comic_text_detector",
         )
-        self.assertEqual(len(result.layout_regions), 2)
-        self.assertEqual(len(result.bubbles), 2)
-        self.assertEqual(len(result.text_regions), 3)
+        self.assertEqual(len(result.layout_regions), 3)
+        self.assertEqual(len(result.bubbles), 1)
+        self.assertEqual(bubble_detector.full_page_calls, 1)
+        self.assertEqual(bubble_detector.roi_calls, 0)
+        self.assertEqual(text_detector.full_page_calls, 1)
+        self.assertEqual(text_detector.roi_calls, 0)
+
+    def test_pp_only_text_region_is_preserved_when_comic_detector_returns_no_text(self):
+        image = FakeImage()
+        result = detect_page_regions_layout_first(
+            image,
+            layout_detector=FakeLayoutDetector(),
+            bubble_detector=FakeBubbleDetector(),
+            text_detector=FakeComicTextDetector([]),
+        )
+
+        self.assertEqual(len(result.text_regions), 2)
+        self.assertEqual(result.text_regions[0].bbox, (8, 8, 34, 30))
         self.assertEqual(result.text_regions[0].bubble_id, 0)
-        self.assertEqual(result.text_regions[1].bubble_id, 1)
-        self.assertIsNone(result.text_regions[2].bubble_id)
-        self.assertEqual(len(bubble_detector.received_rois), 2)
-        self.assertEqual(len(text_detector.received_rois), 2)
-        self.assertEqual(bubble_detector.received_rois[0].bbox, (0, 0, 52, 52))
-        self.assertEqual(text_detector.received_rois[1].bbox, (38, 33, 102, 97))
+        self.assertEqual(result.text_regions[0].reading_order, 0)
+        self.assertEqual(result.text_regions[1].bbox, (76, 4, 114, 26))
+        self.assertIsNone(result.text_regions[1].bubble_id)
+
+    def test_comic_regions_are_preferred_over_overlapping_pp_regions(self):
+        merged = merge_text_region_candidates(
+            [TextRegion(bbox=(10, 10, 30, 30), confidence=0.6, reading_order=0)],
+            [TextRegion(bbox=(11, 11, 29, 29), confidence=0.95, reading_order=2, text="comic")],
+            image_shape=(100, 120, 3),
+            iou_threshold=0.5,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].text, "comic")
+        self.assertEqual(merged[0].bbox, (11, 11, 29, 29))
+
+    def test_unmatched_pp_text_region_remains_without_bubble_id(self):
+        image = FakeImage()
+        text_detector = FakeComicTextDetector(
+            [TextRegion(bbox=(90, 70, 110, 90), confidence=0.9, reading_order=4)]
+        )
+
+        result = detect_page_regions_layout_first(
+            image,
+            layout_detector=FakeLayoutDetector(),
+            bubble_detector=FakeBubbleDetector(),
+            text_detector=text_detector,
+        )
+
+        unmatched = [region for region in result.text_regions if region.bubble_id is None]
+        self.assertTrue(unmatched)
+        self.assertIn((76, 4, 114, 26), [region.bbox for region in unmatched])
+        self.assertIn((90, 70, 110, 90), [region.bbox for region in unmatched])
 
 
 if __name__ == "__main__":

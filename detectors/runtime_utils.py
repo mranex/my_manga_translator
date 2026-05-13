@@ -44,6 +44,18 @@ def clamp_bbox_to_image(
     return (x1, y1, x2, y2)
 
 
+def expand_bbox(
+    bbox: tuple[int, int, int, int],
+    image_shape: Sequence[int],
+    padding: int,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    return clamp_bbox_to_image(
+        (x1 - padding, y1 - padding, x2 + padding, y2 + padding),
+        image_shape,
+    )
+
+
 def union_text_regions_bbox(
     text_regions: Sequence[TextRegion],
     image_shape: Sequence[int],
@@ -181,6 +193,10 @@ def _rect_contour(width: int, height: int) -> np.ndarray:
         ],
         dtype=np_module.int32,
     )
+
+
+def rectangular_contour(width: int, height: int):
+    return _rect_contour(width, height)
 
 
 def mask_to_contour(mask) -> np.ndarray:
@@ -341,6 +357,41 @@ def bubble_region_to_crop_data(
         "mask_crop": mask_crop,
         "ocr_bbox": ocr_bbox,
         "ocr_crop": ocr_crop,
+    }
+
+
+def text_region_to_crop_data(
+    image: np.ndarray,
+    text_region: TextRegion,
+    *,
+    padding: int = 6,
+):
+    np_module = _require_numpy()
+    region_bbox = expand_bbox(text_region.bbox, image.shape, padding)
+    region_crop = crop_bbox(image, region_bbox)
+
+    if text_region.mask is None:
+        mask_crop = np_module.full(
+            region_crop.shape[:2],
+            255,
+            dtype=np_module.uint8,
+        )
+    else:
+        full_mask = normalize_binary_mask(text_region.mask, image.shape)
+        mask_crop = crop_bbox(full_mask, region_bbox)
+        if not np_module.any(mask_crop):
+            mask_crop = np_module.full(
+                region_crop.shape[:2],
+                255,
+                dtype=np_module.uint8,
+            )
+
+    return {
+        "region_bbox": region_bbox,
+        "region_crop": region_crop,
+        "mask_crop": mask_crop,
+        "ocr_bbox": region_bbox,
+        "ocr_crop": crop_bbox(image, region_bbox),
     }
 
 
@@ -556,6 +607,7 @@ __all__ = [
     "convert_legacy_detections_to_bubble_regions",
     "crop_bbox",
     "detect_dark_bubble_from_mask",
+    "expand_bbox",
     "legacy_detection_to_bubble_region",
     "map_bbox_from_roi_to_page",
     "map_bubble_region_from_roi_to_page",
@@ -566,5 +618,7 @@ __all__ = [
     "merge_duplicate_text_regions",
     "normalize_binary_mask",
     "process_bubble_with_mask",
+    "rectangular_contour",
+    "text_region_to_crop_data",
     "union_text_regions_bbox",
 ]

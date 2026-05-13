@@ -15,6 +15,8 @@ from detectors.runtime_utils import (
     mask_to_contour,
     normalize_binary_mask,
     process_bubble_with_mask,
+    rectangular_contour,
+    text_region_to_crop_data,
 )
 from detectors.yolov8_seg_bubble import (
     YoloSegBubbleDetector,
@@ -22,7 +24,7 @@ from detectors.yolov8_seg_bubble import (
     detect_bubble_regions_in_rois,
     normalize_yolov8_segmentation_result,
 )
-from detectors.base import BubbleRegion
+from detectors.base import BubbleRegion, TextRegion
 
 
 class FakeImage:
@@ -141,6 +143,22 @@ class TestSegmentationMaskHelpers(unittest.TestCase):
         self.assertTrue(all(channel >= 200 for channel in detected_color))
         self.assertTrue(np.all(processed[1:4, 1:4] == np.array(detected_color)))
         self.assertEqual(contour_bbox(contour), (1, 1, 3, 3))
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_text_region_crop_data_uses_bbox_with_padding(self):
+        image = np.zeros((20, 30, 3), dtype=np.uint8)
+        text_region = TextRegion(bbox=(10, 8, 14, 12))
+
+        crop_data = text_region_to_crop_data(image, text_region, padding=2)
+
+        self.assertEqual(crop_data["region_bbox"], (8, 6, 16, 14))
+        self.assertEqual(crop_data["ocr_crop"].shape[:2], (8, 8))
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_rectangular_contour_matches_crop_bounds(self):
+        contour = rectangular_contour(6, 4)
+
+        self.assertEqual(contour_bbox(contour), (0, 0, 6, 4))
 
 
 class TestYoloSegBubbleNormalization(unittest.TestCase):
