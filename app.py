@@ -13,10 +13,8 @@ os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 # Suppress deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-from ocr.easyocr_english import EnglishEasyOCR
 from detectors import (
     TextRegion,
-    detect_page_regions,
     detect_page_regions_layout_first,
 )
 from detectors.runtime_utils import (
@@ -37,7 +35,6 @@ from inpainting import (
 )
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
-from manga_ocr import MangaOcr
 from ocr.chrome_lens_ocr import ChromeLensOCR
 from PIL import Image
 import numpy as np
@@ -80,36 +77,13 @@ def log(msg):
     if VERBOSE_LOG:
         print(msg)
 
-MODEL_PATH = "model/model.pt"
-
-
-def detect_legacy_bubbles(image, enable_black_bubble=True):
-    return detect_page_regions(
-        MODEL_PATH,
-        image,
-        enable_black_bubble=enable_black_bubble,
-    ).to_legacy_detections()
-
-
-def unpack_legacy_bubble_detection(result):
-    if len(result) >= 7:
-        x1, y1, x2, y2, score, class_id, is_dark = result[:7]
-    else:
-        x1, y1, x2, y2, score, class_id = result[:6]
-        is_dark = 0
-    return int(x1), int(y1), int(x2), int(y2), score, class_id, int(is_dark)
-
 # Default max height for split (1.5x width = landscape-ish ratio)
 DEFAULT_SPLIT_HEIGHT_RATIO = 2.0
 
 # Global cache for OCR instances
 _OCR_CACHE = {
     "chrome_lens": None,
-    "manga_ocr": None,
-    "easyocr_en": None,
-    "paddleocr_en": None,
     "paddleocr_vl": None,
-    "surya_en": None,
 }
 _INPAINTER_CACHE = {
     "lama_manga": None,
@@ -607,7 +581,7 @@ def home():
     return render_template("index.html")
 
 
-def process_single_image(image, manga_translator, mocr, selected_translator, selected_font, font_analyzer=None, enable_black_bubble=True):
+def process_single_image(image, manga_translator, mocr, selected_translator, selected_font, font_analyzer=None):
     """Process a single image and return the translated version.
     
     Optimized with batch translation for Gemini to reduce API calls.
@@ -733,7 +707,7 @@ def get_font_path(font_name: str) -> str:
         return f"fonts/{font_name}.ttf"
 
 
-def process_images_with_batch(images_data, manga_translator, mocr, selected_font, translator_type, batch_size=10, use_context_memory=True, enable_black_bubble=True):
+def process_images_with_batch(images_data, manga_translator, mocr, selected_font, translator_type, batch_size=10, use_context_memory=True):
     """
     Process multiple images with multi-page batching for Copilot or Gemini.
     Collects all texts first, batch translates, then applies translations.
@@ -770,7 +744,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     
     start_time = time.time()
     
-    # Check if using Chrome Lens OCR (has batch support)
+    # Use batch OCR when the selected backend supports it.
     use_batch_ocr = hasattr(mocr, 'process_batch')
     
     # Phase 1a: Detect page regions and collect all OCR items
@@ -851,10 +825,10 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         print(f"\n[Phase 2] OCR processing {len(all_ocr_images)} text items...", end=" ", flush=True)
         
         if use_batch_ocr:
-            # Use concurrent batch OCR (Chrome Lens)
+            # Use batch OCR on providers that implement process_batch.
             all_texts = mocr.process_batch(all_ocr_images)
         else:
-            # Sequential OCR (MangaOcr or others)
+            # Sequential OCR for simple callable providers.
             all_texts = [mocr(img) for img in all_ocr_images]
         
         # Map texts back to pages
@@ -1017,9 +991,6 @@ def upload_file():
     # Get context memory setting (checkbox - "on" if checked, None if not)
     use_context_memory = request.form.get("context_memory") == "on"
 
-    # Get black bubble detection setting (checkbox - "on" if checked, None if not)
-    enable_black_bubble = request.form.get("detect_black_bubbles") == "on"
-
     # Get split long images setting (checkbox - "on" if checked, None if not)
     split_long_images = request.form.get("split_long_images") == "on"
 
@@ -1037,13 +1008,9 @@ def upload_file():
         selected_font = selected_font_raw
 
     # Get OCR engine
-    selected_ocr_raw = request.form.get("selected_ocr", "Chrome-Lens").strip()
+    selected_ocr_raw = request.form.get("selected_ocr", "PaddleOCR-VL Local").strip()
     selected_ocr = {
         "chrome-lens": "chrome-lens",
-        "manga-ocr": "manga-ocr",
-        "easyocr-english": "easyocr-english",
-        "paddleocr-english": "paddleocr-english",
-        "surya-english": "surya-english",
         "paddleocr-vl local": "paddleocr-vl",
         "paddleocr-vl": "paddleocr-vl",
     }.get(selected_ocr_raw.lower(), selected_ocr_raw.lower())
@@ -1137,25 +1104,6 @@ def upload_file():
                 _OCR_CACHE["chrome_lens"] = ChromeLensOCR()
             mocr = _OCR_CACHE["chrome_lens"]
 
-        elif selected_ocr == "easyocr-english":
-            if _OCR_CACHE["easyocr_en"] is None:
-                _OCR_CACHE["easyocr_en"] = EnglishEasyOCR(gpu=True)
-            mocr = _OCR_CACHE["easyocr_en"]
-
-        elif selected_ocr == "paddleocr-english":
-            if _OCR_CACHE["paddleocr_en"] is None:
-                try:
-                    from ocr.paddleocr_english import EnglishPaddleOCR
-                except Exception as exc:
-                    raise RuntimeError(f"PaddleOCR is unavailable in this environment: {exc}") from exc
-                _OCR_CACHE["paddleocr_en"] = EnglishPaddleOCR(
-                    device="gpu:0",
-                    min_score=0.05,
-                    debug=True,
-                    keep_debug_images=True,
-                )
-            mocr = _OCR_CACHE["paddleocr_en"]
-
         elif selected_ocr == "paddleocr-vl":
             if _OCR_CACHE["paddleocr_vl"] is None:
                 from ocr.paddleocr_vl_ocr import PaddleOCRVLOCR
@@ -1165,35 +1113,17 @@ def upload_file():
             print("Using PaddleOCR-VL via llama.cpp")
             print(f"PaddleOCR-VL server: {mocr.server_url}")
 
-        elif selected_ocr == "surya-english":
-            if _OCR_CACHE["surya_en"] is None:
-                try:
-                    from ocr.surya_ocr import SuryaOCR
-                except Exception as exc:
-                    raise RuntimeError(f"Surya OCR is unavailable in this environment: {exc}") from exc
-                _OCR_CACHE["surya_en"] = SuryaOCR(
-                    min_confidence=0.15,
-                    min_side=900,
-                    padding=18,
-                    task_name="ocr_with_boxes",
-                    preserve_line_breaks=False,
-                    sort_lines=False,
-                    disable_math=True,
-                    batch_size=5,
-                    clear_vram_after_batch=True,
-                    verbose=False,
-                )
-            mocr = _OCR_CACHE["surya_en"]
-
         else:
-            if _OCR_CACHE["manga_ocr"] is None:
-                _OCR_CACHE["manga_ocr"] = MangaOcr()
-            mocr = _OCR_CACHE["manga_ocr"]
+            raise ValueError(
+                f"Unsupported OCR provider '{selected_ocr_raw}'. "
+                "Supported providers: PaddleOCR-VL Local, Chrome-Lens."
+            )
     except Exception as exc:
         error_message = (
             f"OCR provider '{selected_ocr}' failed to initialize: {exc}\n"
             "For PaddleOCR-VL, set PADDLEOCR_VL_MODEL_PATH, PADDLEOCR_VL_MMPROJ_PATH, "
-            "and LLAMA_CPP_DIR or PADDLEOCR_VL_SERVER_URL."
+            "and LLAMA_CPP_DIR or PADDLEOCR_VL_SERVER_URL. "
+            "Chrome-Lens remains available as the optional fallback provider."
         )
         return error_message, 500
     
@@ -1301,7 +1231,6 @@ def upload_file():
             all_images, manga_translator, mocr, selected_font, 
             translator_type=selected_translator, batch_size=10,
             use_context_memory=use_context_memory,
-            enable_black_bubble=enable_black_bubble
         )
         
         # Encode results to base64 (with optional splitting)
@@ -1368,7 +1297,6 @@ def upload_file():
                     processed_image = process_single_image(
                         image, manga_translator, mocr, 
                         selected_translator, selected_font, None,
-                        enable_black_bubble=enable_black_bubble
                     )
                     
                     # Split long images if enabled

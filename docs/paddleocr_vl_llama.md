@@ -1,29 +1,31 @@
 ## PaddleOCR-VL via llama.cpp
 
-This app supports a local OCR provider named `paddleocr-vl` / `PaddleOCR-VL Local`.
+`PaddleOCR-VL Local` là OCR local được khuyến nghị cho app hiện tại.
 
-It OCRs the existing text crops produced by the current detector pipeline. It does not run page detection and it does not require PaddleOCR, PaddlePaddle, or Transformers changes in the main Python environment.
+Backend này chỉ OCR các crop text đã được pipeline chọn sẵn. Nó không chạy page detection và không yêu cầu cài `paddleocr`, `paddlepaddle` hay đổi phiên bản `transformers` trong Python venv chính.
 
-### Required environment variables
+Chrome Lens vẫn có thể giữ lại như fallback tùy chọn, nhưng OCR chính của app hiện tại là `paddleocr-vl`.
+
+### Biến môi trường cần có
 
 - `PADDLEOCR_VL_MODEL_PATH`
 - `PADDLEOCR_VL_MMPROJ_PATH`
 - `LLAMA_CPP_DIR`
 
-Optional:
+Tùy chọn:
 
 - `PADDLEOCR_VL_SERVER_URL`
 - `PADDLEOCR_VL_LLAMA_SERVER_CMD`
 - `PADDLEOCR_VL_MAX_WORKERS`
 
-### Default local paths
+### Đường dẫn local mặc định
 
-If the env vars are not set, the app looks for:
+Nếu không set env var, app sẽ thử đọc:
 
 - `model/paddleocr_vl/model.gguf`
 - `model/paddleocr_vl/mmproj.gguf`
 
-### Example Windows setup
+### Ví dụ cấu hình trên Windows
 
 ```powershell
 set PADDLEOCR_VL_MODEL_PATH=C:\path\to\model.gguf
@@ -31,17 +33,17 @@ set PADDLEOCR_VL_MMPROJ_PATH=C:\path\to\mmproj.gguf
 set LLAMA_CPP_DIR=C:\path\to\llama.cpp
 ```
 
-### Optional server URL
+### Dùng server có sẵn
 
-If you already run a compatible llama.cpp server:
+Nếu bạn đã tự chạy một `llama-server` tương thích:
 
 ```powershell
 set PADDLEOCR_VL_SERVER_URL=http://127.0.0.1:8088
 ```
 
-### Optional custom server command
+### Dùng command tùy biến để start llama-server
 
-If your llama.cpp build needs a custom launch command:
+Nếu bản `llama.cpp` của bạn cần lệnh khác:
 
 ```powershell
 set PADDLEOCR_VL_LLAMA_SERVER_CMD=llama-server -m {model} --mmproj {mmproj} --host {host} --port {port} -c {ctx} -ngl {ngl}

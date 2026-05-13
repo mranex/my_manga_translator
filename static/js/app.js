@@ -169,16 +169,6 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    const blackBubblesCheckbox = document.getElementById('detect_black_bubbles');
-    if (blackBubblesCheckbox) {
-        const saved = localStorage.getItem('detect_black_bubbles');
-        if (saved !== null) {
-            blackBubblesCheckbox.checked = saved === 'true';
-        }
-        blackBubblesCheckbox.addEventListener('change', () => {
-            localStorage.setItem('detect_black_bubbles', blackBubblesCheckbox.checked);
-        });
-    }
 });
 
 

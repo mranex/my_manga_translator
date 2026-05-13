@@ -1,22 +1,50 @@
-# Byte-compiled / optimized / DLL files
+# Python caches
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
 
-# Virtual environments
-venv/
-env/
-.env/
+# Local env
+.venv/
+.env
+.env.*
 
-# IDE
-.vscode/
-.idea/
+# Python/test caches
+.pytest_cache/
+.coverage
+htmlcov/
 
-# OS files
+# Model/cache folders
+model/
+models/
+.cache/
+huggingface/
+hf_cache/
+
+# Local external tools
+tools/llama.cpp/
+vendor/llama.cpp/
+llama.cpp/
+
+# Runtime outputs
+outputs/
+output/
+results/
+translated/
+uploads/
+temp/
+tmp/
+logs/
+debug/
+
+# Generated artifacts
+*.zip
+*.log
+
+# OS/editor noise
 .DS_Store
 Thumbs.db
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
+# Local 
+test_*.py
+local_tests/

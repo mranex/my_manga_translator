@@ -1,3 +1,5 @@
+"""Legacy YOLO/OpenCV bubble adapter kept for reference and compatibility tests."""
+
 from __future__ import annotations
 
 from typing import Any

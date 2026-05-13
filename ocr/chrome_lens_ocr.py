@@ -18,7 +18,7 @@ class ChromeLensOCR:
     """
     OCR engine using Google Chrome Lens API via chrome-lens-py.
     
-    This provides an alternative to manga-ocr with the following benefits:
+    This provides an optional fallback OCR path with the following benefits:
     - Free Google Lens OCR API
     - Multi-language support with auto-detection
     - Text block segmentation for comics/manga

@@ -141,7 +141,7 @@ if "%PADDLEOCR_VL_AVAILABLE%"=="1" (
 ) else (
     echo.
     echo [INFO] PaddleOCR-VL will not be pre-started.
-    echo        You can still use Chrome Lens, EasyOCR, MangaOCR, etc.
+    echo        You can still use Chrome Lens as the optional fallback OCR provider.
     echo        To enable PaddleOCR-VL:
     echo        - Put model.gguf and mmproj.gguf in model\paddleocr_vl\
     echo        - Put llama-server.exe in tools\llama.cpp\ or edit LLAMA_CPP_DIR

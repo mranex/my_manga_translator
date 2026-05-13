@@ -27,20 +27,6 @@ from .selection import (
 from .pp_doclayout_v3 import PPDocLayoutV3Detector
 
 
-def detect_page_regions(
-    model_path: str,
-    image: Any,
-    enable_black_bubble: bool = True,
-) -> PageDetectionResult:
-    from .legacy_yolo_bubble import detect_page_regions as _detect_page_regions
-
-    return _detect_page_regions(
-        model_path,
-        image,
-        enable_black_bubble=enable_black_bubble,
-    )
-
-
 def detect_segmented_page_regions(
     image: Any,
     *,
@@ -148,7 +134,6 @@ __all__ = [
     "TextRegion",
     "LayoutRegion",
     "PageDetectionResult",
-    "detect_page_regions",
     "detect_segmented_bubble_regions",
     "detect_segmented_page_regions",
     "detect_page_regions_layout_first",
