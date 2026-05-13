@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -9,8 +9,7 @@ except ModuleNotFoundError:
     ImageDraw = None
     ImageFont = None
 
-
-_FONT_CACHE: dict[tuple[str, int], object] = {}
+from .fonts import get_cached_font
 
 
 def _require_pillow():
@@ -27,17 +26,11 @@ class TextLayoutResult:
     text_width: int
     text_height: int
     line_spacing: int
-
-
-def get_cached_font(font_path: str, size: int):
-    _require_pillow()
-    cache_key = (font_path, int(size))
-    if cache_key not in _FONT_CACHE:
-        try:
-            _FONT_CACHE[cache_key] = ImageFont.truetype(font_path, size=int(size))
-        except Exception:
-            _FONT_CACHE[cache_key] = ImageFont.load_default()
-    return _FONT_CACHE[cache_key]
+    text_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
+    origin_offset: tuple[int, int] = (0, 0)
+    used_align: str = "center"
+    overflow: bool = False
+    debug: dict = field(default_factory=dict)
 
 
 def _make_measure_draw():
@@ -46,7 +39,7 @@ def _make_measure_draw():
     return ImageDraw.Draw(canvas)
 
 
-def _measure_text_block(draw, text: str, font, *, align: str, spacing: int, stroke_width: int = 0):
+def measure_multiline_text(draw, text, font, *, align, spacing, stroke_width):
     bbox = draw.multiline_textbbox(
         (0, 0),
         text or " ",
@@ -55,7 +48,21 @@ def _measure_text_block(draw, text: str, font, *, align: str, spacing: int, stro
         spacing=spacing,
         stroke_width=stroke_width,
     )
-    return max(0, int(bbox[2] - bbox[0])), max(0, int(bbox[3] - bbox[1]))
+    width = max(0, int(bbox[2] - bbox[0]))
+    height = max(0, int(bbox[3] - bbox[1]))
+    return width, height, tuple(int(value) for value in bbox)
+
+
+def _measure_text_block(draw, text: str, font, *, align: str, spacing: int, stroke_width: int = 0):
+    width, height, _ = measure_multiline_text(
+        draw,
+        text,
+        font,
+        align=align,
+        spacing=spacing,
+        stroke_width=stroke_width,
+    )
+    return width, height
 
 
 def _split_long_token(token: str, draw, font, max_width: int, *, stroke_width: int = 0) -> list[str]:
@@ -227,6 +234,149 @@ def wrap_text_to_width(
     return wrapped_lines or [text]
 
 
+def optimal_wrap_text_to_width(
+    text: str,
+    font,
+    max_width: int,
+    *,
+    stroke_width: int = 0,
+    spacing: int = 0,
+    balance_strength: float = 1.0,
+) -> list[str]:
+    _require_pillow()
+    if not text:
+        return [""]
+    if max_width <= 0:
+        return [text]
+
+    draw = _make_measure_draw()
+    wrapped_lines: list[str] = []
+
+    paragraphs = text.splitlines() or [text]
+    for paragraph in paragraphs:
+        stripped = paragraph.strip()
+        if not stripped:
+            wrapped_lines.append("")
+            continue
+        words = stripped.split()
+        if len(words) <= 2:
+            wrapped_lines.extend(
+                wrap_text_to_width(
+                    stripped,
+                    font,
+                    max_width,
+                    align="left",
+                    stroke_width=stroke_width,
+                )
+            )
+            continue
+
+        tokens: list[str] = []
+        for word in words:
+            width, _ = _measure_text_block(
+                draw,
+                word,
+                font,
+                align="left",
+                spacing=spacing,
+                stroke_width=stroke_width,
+            )
+            if width > max_width:
+                tokens.extend(_split_long_token(word, draw, font, max_width, stroke_width=stroke_width))
+            else:
+                tokens.append(word)
+
+        token_count = len(tokens)
+        if token_count == 0:
+            wrapped_lines.append("")
+            continue
+        if token_count > 60:
+            wrapped_lines.extend(
+                wrap_text_to_width(
+                    stripped,
+                    font,
+                    max_width,
+                    align="left",
+                    stroke_width=stroke_width,
+                )
+            )
+            continue
+
+        line_width_cache: dict[tuple[int, int], int] = {}
+
+        def line_width(start: int, end: int) -> int:
+            cache_key = (start, end)
+            if cache_key not in line_width_cache:
+                candidate = " ".join(tokens[start:end])
+                width, _ = _measure_text_block(
+                    draw,
+                    candidate,
+                    font,
+                    align="left",
+                    spacing=spacing,
+                    stroke_width=stroke_width,
+                )
+                line_width_cache[cache_key] = width
+            return line_width_cache[cache_key]
+
+        best_cost = [float("inf")] * (token_count + 1)
+        next_break = [token_count] * (token_count + 1)
+        best_cost[token_count] = 0.0
+
+        max_width_float = float(max_width)
+        for start in range(token_count - 1, -1, -1):
+            for end in range(start + 1, token_count + 1):
+                width = line_width(start, end)
+                overflow = max(0, width - max_width)
+                if overflow > 0 and end > start + 1:
+                    break
+
+                if overflow > 0:
+                    cost = 1_000_000.0 + (overflow / max_width_float) ** 2 * 10_000.0
+                else:
+                    leftover = max_width - width
+                    normalized_leftover = leftover / max_width_float
+                    cost = (normalized_leftover ** 2) * float(balance_strength)
+                    cost += 0.035
+                    if end == token_count:
+                        if width < max_width * 0.45 and token_count > 3:
+                            cost += 0.45
+                        if len(tokens[start:end]) == 1 and start > 0:
+                            cost += 0.10
+                    else:
+                        cost += 0.02 * (end - start == 1)
+
+                total_cost = cost + best_cost[end]
+                if total_cost < best_cost[start]:
+                    best_cost[start] = total_cost
+                    next_break[start] = end
+
+        if best_cost[0] == float("inf"):
+            wrapped_lines.extend(
+                wrap_text_to_width(
+                    stripped,
+                    font,
+                    max_width,
+                    align="left",
+                    stroke_width=stroke_width,
+                )
+            )
+            continue
+
+        paragraph_lines: list[str] = []
+        cursor = 0
+        while cursor < token_count:
+            next_cursor = next_break[cursor]
+            if next_cursor <= cursor:
+                next_cursor = cursor + 1
+            paragraph_lines.append(" ".join(tokens[cursor:next_cursor]))
+            cursor = next_cursor
+
+        wrapped_lines.extend(paragraph_lines)
+
+    return wrapped_lines or [text]
+
+
 def fit_text_layout(
     text: str,
     font_path: str,
@@ -238,6 +388,8 @@ def fit_text_layout(
     min_font_size: int = 6,
     max_font_size: int = 160,
     stroke_width: int = 0,
+    line_spacing_ratio: float = 0.18,
+    min_line_spacing: int = 1,
 ) -> TextLayoutResult:
     _require_pillow()
     usable_width = max(1, int(width) - (int(padding) * 2))
@@ -251,34 +403,55 @@ def fit_text_layout(
     while low <= high:
         mid = (low + high) // 2
         font = get_cached_font(font_path, mid)
-        line_spacing = max(1, int(round(mid * 0.25)))
-        lines = wrap_text_to_width(
+        base_spacing = max(int(min_line_spacing), int(round(mid * float(line_spacing_ratio))))
+        spacing_candidates = [base_spacing]
+        if base_spacing > min_line_spacing:
+            spacing_candidates.extend(
+                spacing
+                for spacing in range(base_spacing - 1, int(min_line_spacing) - 1, -1)
+                if spacing not in spacing_candidates and spacing >= max(int(min_line_spacing), base_spacing - 3)
+            )
+            if int(min_line_spacing) not in spacing_candidates:
+                spacing_candidates.append(int(min_line_spacing))
+
+        lines = optimal_wrap_text_to_width(
             text,
             font,
             usable_width,
-            align=align,
             stroke_width=stroke_width,
+            spacing=base_spacing,
         )
         wrapped_text = "\n".join(lines)
-        text_width, text_height = _measure_text_block(
-            draw,
-            wrapped_text,
-            font,
-            align=align,
-            spacing=line_spacing,
-            stroke_width=stroke_width,
-        )
+        fitted_candidate: TextLayoutResult | None = None
 
-        if text_width <= usable_width and text_height <= usable_height:
-            best_result = TextLayoutResult(
-                font=font,
-                font_size=mid,
-                wrapped_text=wrapped_text,
-                lines=lines,
-                text_width=text_width,
-                text_height=text_height,
-                line_spacing=line_spacing,
+        for spacing in spacing_candidates:
+            text_width, text_height, text_bbox = measure_multiline_text(
+                draw,
+                wrapped_text,
+                font,
+                align=align,
+                spacing=spacing,
+                stroke_width=stroke_width,
             )
+            if text_width <= usable_width and text_height <= usable_height:
+                fitted_candidate = TextLayoutResult(
+                    font=font,
+                    font_size=mid,
+                    wrapped_text=wrapped_text,
+                    lines=lines,
+                    text_width=text_width,
+                    text_height=text_height,
+                    line_spacing=spacing,
+                    text_bbox=text_bbox,
+                    origin_offset=(text_bbox[0], text_bbox[1]),
+                    used_align=align,
+                    overflow=False,
+                    debug={"spacing_candidates": spacing_candidates},
+                )
+                break
+
+        if fitted_candidate is not None:
+            best_result = fitted_candidate
             low = mid + 1
         else:
             high = mid - 1
@@ -288,16 +461,16 @@ def fit_text_layout(
 
     fallback_size = int(min_font_size)
     font = get_cached_font(font_path, fallback_size)
-    line_spacing = max(1, int(round(fallback_size * 0.25)))
-    lines = wrap_text_to_width(
+    line_spacing = max(int(min_line_spacing), int(round(fallback_size * float(line_spacing_ratio))))
+    lines = optimal_wrap_text_to_width(
         text,
         font,
         usable_width,
-        align=align,
         stroke_width=stroke_width,
+        spacing=line_spacing,
     )
     wrapped_text = "\n".join(lines)
-    text_width, text_height = _measure_text_block(
+    text_width, text_height, text_bbox = measure_multiline_text(
         draw,
         wrapped_text,
         font,
@@ -313,6 +486,11 @@ def fit_text_layout(
         text_width=text_width,
         text_height=text_height,
         line_spacing=line_spacing,
+        text_bbox=text_bbox,
+        origin_offset=(text_bbox[0], text_bbox[1]),
+        used_align=align,
+        overflow=text_width > usable_width or text_height > usable_height,
+        debug={"spacing_candidates": [line_spacing]},
     )
 
 
@@ -320,5 +498,7 @@ __all__ = [
     "TextLayoutResult",
     "fit_text_layout",
     "get_cached_font",
+    "measure_multiline_text",
+    "optimal_wrap_text_to_width",
     "wrap_text_to_width",
 ]

@@ -40,7 +40,7 @@ from PIL import Image
 import numpy as np
 import base64
 import cv2
-from text_rendering import choose_text_color_for_region, render_text_block
+from text_rendering import choose_render_style_for_item, render_manga_text_block
 
 
 app = Flask(__name__)
@@ -332,50 +332,17 @@ def finalize_page_translation(image, render_items, translated_texts, font_path):
             continue
 
         render_bbox = render_item["render_bbox"]
-        color_mask = None
-        if render_item.get("kind") == "outside_text" and render_item.get("text_region") is not None:
-            color_mask = render_item["text_region"].mask
-        elif render_item.get("text_regions"):
-            first_mask_region = next(
-                (region for region in render_item["text_regions"] if getattr(region, "mask", None) is not None),
-                None,
-            )
-            color_mask = None if first_mask_region is None else first_mask_region.mask
-        elif render_item.get("bubble_region") is not None:
-            color_mask = render_item["bubble_region"].mask
-
-        text_color, stroke_color, stroke_width = choose_text_color_for_region(
+        render_block = choose_render_style_for_item(
             background_reference,
-            render_bbox,
-            mask=color_mask,
-        )
-
-        bubble_region = render_item.get("bubble_region")
-        if bubble_region is not None:
-            if bubble_region.is_dark:
-                text_color = (255, 255, 255)
-                stroke_color = (0, 0, 0)
-                stroke_width = max(1, stroke_width or 1)
-            else:
-                text_color = (0, 0, 0)
-                stroke_color = (255, 255, 255)
-                stroke_width = max(1, stroke_width or 1)
-        elif render_item.get("kind") == "outside_text":
-            stroke_color = (0, 0, 0) if text_color == (255, 255, 255) else (255, 255, 255)
-            stroke_width = max(1, stroke_width or 1)
-
-        render_text_block(
-            final_image,
-            translated_text,
+            render_item,
             render_bbox,
             font_path,
-            text_color,
-            stroke_color=stroke_color,
-            stroke_width=stroke_width,
-            align="center",
-            vertical=False,
-            padding=2,
-            supersample=3,
+            text=translated_text,
+        )
+
+        render_manga_text_block(
+            final_image,
+            render_block,
         )
 
     return final_image
