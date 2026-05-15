@@ -31,7 +31,7 @@ RUNTIME_MODULES = [
     ("torch", "torch"),
     ("transformers", "transformers"),
     ("numpy", "numpy"),
-    ("PIL.Image", "pillow"),
+    ("cv2", "opencv-python"),
 ]
 _DETECTOR_CACHE = {
     "key": None,
@@ -494,47 +494,142 @@ class PPDocLayoutV3Detector:
             raise ValueError(f"PPLayout RGB preparation failed for shape: {rgb.shape}")
         return rgb
 
-    def detect_layout_regions(self, image) -> list[LayoutRegion]:
+    def _resolve_processor_size(self) -> tuple[int, int]:
+        size_value = getattr(self._image_processor, "size", None)
+        default_size = (1024, 1024)
+
+        if isinstance(size_value, dict):
+            height = size_value.get("height")
+            width = size_value.get("width")
+            if height is not None and width is not None:
+                return max(1, int(height)), max(1, int(width))
+            shortest_edge = size_value.get("shortest_edge")
+            if shortest_edge is not None:
+                edge = max(1, int(shortest_edge))
+                return edge, edge
+            longest_edge = size_value.get("longest_edge")
+            if longest_edge is not None:
+                edge = max(1, int(longest_edge))
+                return edge, edge
+
+        if isinstance(size_value, int):
+            edge = max(1, int(size_value))
+            return edge, edge
+
+        if isinstance(size_value, (list, tuple)):
+            if len(size_value) >= 2:
+                return max(1, int(size_value[0])), max(1, int(size_value[1]))
+            if len(size_value) == 1:
+                edge = max(1, int(size_value[0]))
+                return edge, edge
+
+        return default_size
+
+    def _resolve_image_mean(self) -> tuple[float, float, float]:
+        return self._resolve_normalization_triplet(
+            getattr(self._image_processor, "image_mean", None),
+            default=(0.485, 0.456, 0.406),
+        )
+
+    def _resolve_image_std(self) -> tuple[float, float, float]:
+        return self._resolve_normalization_triplet(
+            getattr(self._image_processor, "image_std", None),
+            default=(0.229, 0.224, 0.225),
+        )
+
+    def _resolve_normalization_triplet(
+        self,
+        value: Any,
+        *,
+        default: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
         np_module = _require_numpy()
+        if value is None:
+            return default
+
+        if isinstance(value, (int, float)):
+            scalar = float(value)
+            return scalar, scalar, scalar
+
+        try:
+            arr = np_module.asarray(value, dtype=np_module.float32).reshape(-1)
+        except Exception:
+            return default
+
+        if arr.size == 0:
+            return default
+        if arr.size == 1:
+            scalar = float(arr[0])
+            return scalar, scalar, scalar
+        if arr.size >= 3:
+            return float(arr[0]), float(arr[1]), float(arr[2])
+        return default
+
+    def _prepare_model_inputs(self, image) -> tuple[dict[str, Any], tuple[int, int]]:
+        np_module = _require_numpy()
+        torch = importlib.import_module("torch")
+        cv2 = importlib.import_module("cv2")
+
+        _write_pp_layout_breadcrumb("before manual PPLayout preprocess")
+        rgb = self._prepare_rgb_array(image)
+        original_size = (int(rgb.shape[0]), int(rgb.shape[1]))
+        input_h, input_w = self._resolve_processor_size()
+        mean = np_module.asarray(self._resolve_image_mean(), dtype=np_module.float32).reshape(1, 1, 3)
+        std = np_module.asarray(self._resolve_image_std(), dtype=np_module.float32).reshape(1, 1, 3)
+
+        resized = cv2.resize(rgb, (int(input_w), int(input_h)), interpolation=cv2.INTER_LINEAR)
+        resized = np_module.ascontiguousarray(resized)
+        arr = resized.astype(np_module.float32) / np_module.float32(255.0)
+        arr = (arr - mean) / std
+        arr = arr.transpose(2, 0, 1)
+        arr = np_module.ascontiguousarray(arr, dtype=np_module.float32)
+        pixel_values = torch.from_numpy(arr).unsqueeze(0)
+
+        _write_pp_layout_breadcrumb(
+            "after manual PPLayout preprocess",
+            tensor_shape=tuple(int(value) for value in pixel_values.shape),
+            tensor_dtype=str(pixel_values.dtype),
+            input_size=(int(input_h), int(input_w)),
+            original_size=original_size,
+        )
+        return {"pixel_values": pixel_values}, original_size
+
+    def detect_layout_regions(self, image) -> list[LayoutRegion]:
         if self._model is None or self._image_processor is None:
             self.load()
 
         torch = importlib.import_module("torch")
-        rgb_image = self._prepare_rgb_array(image)
-
-        _write_pp_layout_breadcrumb(
-            "before PPLayout image_processor call",
-            image_shape=tuple(int(value) for value in rgb_image.shape),
-            image_dtype=str(rgb_image.dtype),
-            image_strides=tuple(int(value) for value in rgb_image.strides),
-            c_contiguous=bool(rgb_image.flags.c_contiguous),
-            input_type="numpy_rgb",
-        )
-
-        inputs = self._image_processor(images=rgb_image, return_tensors="pt")
-        _write_pp_layout_breadcrumb(
-            "after PPLayout image_processor call",
-            input_type="numpy_rgb",
-        )
+        inputs, original_size = self._prepare_model_inputs(image)
         prepared_inputs = {
             key: value.to(self.device) if hasattr(value, "to") else value
             for key, value in inputs.items()
         }
 
+        _write_pp_layout_breadcrumb("before PPLayout model forward")
         with torch.inference_mode():
             outputs = self._model(**prepared_inputs)
+        _write_pp_layout_breadcrumb("after PPLayout model forward")
 
         processed_output = None
         post_process = getattr(self._image_processor, "post_process_object_detection", None)
         if callable(post_process):
-            target_sizes = torch.tensor([[int(rgb_image.shape[0]), int(rgb_image.shape[1])]])
-            processed = post_process(
-                outputs,
-                threshold=self.confidence_threshold,
-                target_sizes=target_sizes,
-            )
-            if isinstance(processed, (list, tuple)) and processed:
-                processed_output = processed[0]
+            _write_pp_layout_breadcrumb("before PPLayout postprocess", original_size=original_size)
+            try:
+                target_sizes = torch.tensor([[int(original_size[0]), int(original_size[1])]])
+                processed = post_process(
+                    outputs,
+                    threshold=self.confidence_threshold,
+                    target_sizes=target_sizes,
+                )
+                if isinstance(processed, (list, tuple)) and processed:
+                    processed_output = processed[0]
+                _write_pp_layout_breadcrumb("after PPLayout postprocess", original_size=original_size)
+            except Exception as exc:
+                _write_pp_layout_breadcrumb(
+                    "PPLayout postprocess failed; falling back to raw outputs",
+                    level="warning",
+                    error=str(exc),
+                )
 
         if processed_output is None:
             processed_output = {
