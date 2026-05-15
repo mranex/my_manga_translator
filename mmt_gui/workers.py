@@ -5,11 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+import threading
+import traceback
 from typing import Any
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 
 from mmt_core import (
+    OCRConfig,
+    ExportConfig,
+    ProcessPipelineResult,
+    TranslationConfig,
     inpaint_json_path,
     load_ocr_json,
     load_inpaint_json,
@@ -17,12 +23,16 @@ from mmt_core import (
     load_translation_json,
     load_lama_model,
     render_json_path,
+    run_process_pipeline,
     summarize_ocr_items,
     summarize_inpaint_json,
     summarize_render_json,
     summarize_translation_json,
     unload_lama_model,
 )
+from mmt_core.ocr_models import provider_label
+from mmt_core.ocr_providers import create_ocr_provider
+from mmt_core.export_stage import run_export
 from mmt_core.detection_stage import run_detection_for_image
 from mmt_core.inpaint_stage import prepare_inpaint_mask_for_page, run_inpaint_for_page, run_inpaint_for_pages
 from mmt_core.llama_server import LlamaServerManager, LlamaServerStatus
@@ -118,6 +128,7 @@ class OCRInferenceTask(PipelineTask):
 
     project: Any = None
     image_relative_paths: list[str] = field(default_factory=list)
+    config: Any = None
     server_url: str = ""
     force: bool = False
     selected_item_ids_by_page: dict[str, list[int]] = field(default_factory=dict)
@@ -399,12 +410,57 @@ class LamaModelTaskResult:
     message: str
 
 
+@dataclass(slots=True)
+class ExportTask(PipelineTask):
+    """Configuration for exporting cached output files."""
+
+    project: Any = None
+    config: Any = None
+    current_page: str | None = None
+    selected_pages: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ExportWorkerResult:
+    """Structured result for a completed export run."""
+
+    manifest: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def exported_count(self) -> int:
+        return int(self.manifest.get("exported_count", 0) or 0)
+
+    @property
+    def skipped_count(self) -> int:
+        return int(self.manifest.get("skipped_count", 0) or 0)
+
+    @property
+    def error_count(self) -> int:
+        return int(self.manifest.get("error_count", 0) or 0)
+
+
+@dataclass(slots=True)
+class ProcessTask(PipelineTask):
+    """Configuration for a one-click Detection -> Render process run."""
+
+    project: Any = None
+    image_relative_paths: list[str] = field(default_factory=list)
+    scope: str = "chapter"
+    force: bool = False
+    ocr_config: Any = None
+    translation_config: Any = None
+    inpaint_settings: dict[str, Any] = field(default_factory=dict)
+    render_config: Any = None
+    cancel_token: Any = None
+
+
 class WorkerSignals(QObject):
     """Signals shared by background task runners."""
 
     started = pyqtSignal(str)
     progress = pyqtSignal(int)
     message = pyqtSignal(str)
+    event = pyqtSignal(object)
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -419,11 +475,21 @@ class TaskWorker(QRunnable):
         self,
         task: PipelineTask,
         callback: WorkerCallback | None = None,
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
+        self.setAutoDelete(False)
         self.task = task
         self.callback = callback
         self.signals = WorkerSignals()
+        self._cancel_event = cancel_event or threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+
+    def cancel_requested(self) -> bool:
+        return self._cancel_event.is_set()
 
     @pyqtSlot()
     def run(self) -> None:
@@ -438,6 +504,11 @@ class TaskWorker(QRunnable):
             else:
                 result = self.callback(self.task, self.signals)
         except Exception as exc:  # pragma: no cover - defensive UI plumbing.
+            thread_name = threading.current_thread().name
+            self.signals.message.emit(
+                f"{self.task.name} failed on worker thread {thread_name}: {exc}"
+            )
+            self.signals.message.emit(traceback.format_exc())
             self.signals.failed.emit(str(exc))
             return
 
@@ -510,6 +581,20 @@ def create_lama_model_worker(task: LamaModelTask) -> TaskWorker:
     return TaskWorker(task=task, callback=_run_lama_model_task)
 
 
+def create_export_worker(task: ExportTask) -> TaskWorker:
+    """Create a QRunnable that exports cached outputs off the UI thread."""
+
+    return TaskWorker(task=task, callback=_run_export_task)
+
+
+def create_process_worker(task: ProcessTask) -> TaskWorker:
+    """Create a QRunnable that runs the one-click process pipeline off the UI thread."""
+
+    cancel_event = threading.Event()
+    task.cancel_token = cancel_event
+    return TaskWorker(task=task, callback=_run_process_task, cancel_event=cancel_event)
+
+
 def _run_detection_task(task: PipelineTask, signals: WorkerSignals) -> DetectionWorkerResult:
     if not isinstance(task, DetectionTask):
         raise TypeError("Detection worker received an unexpected task type.")
@@ -523,6 +608,15 @@ def _run_detection_task(task: PipelineTask, signals: WorkerSignals) -> Detection
     signals.progress.emit(0)
 
     for index, image_path in enumerate(task.image_paths, start=1):
+        signals.event.emit(
+            {
+                "stage": "detection",
+                "event": "page_start",
+                "image_path": str(image_path),
+                "page_index": index,
+                "page_total": total_pages,
+            }
+        )
         signals.message.emit(f"[{index}/{total_pages}] Detecting {Path(image_path).name}")
 
         try:
@@ -552,6 +646,16 @@ def _run_detection_task(task: PipelineTask, signals: WorkerSignals) -> Detection
                 )
             )
             signals.message.emit(f"Detection complete: {json_path}")
+            signals.event.emit(
+                {
+                    "stage": "detection",
+                    "event": "page_done",
+                    "image_path": str(image_path),
+                    "output_path": str(json_path),
+                    "page_index": index,
+                    "page_total": total_pages,
+                }
+            )
 
         signals.progress.emit(int((index / total_pages) * 100))
 
@@ -590,6 +694,15 @@ def _run_ocr_preparation_task(
     signals.progress.emit(0)
 
     for index, image_relative_path in enumerate(task.image_relative_paths, start=1):
+        signals.event.emit(
+            {
+                "stage": "ocr_prepare",
+                "event": "page_start",
+                "image_relative_path": str(image_relative_path),
+                "page_index": index,
+                "page_total": total_pages,
+            }
+        )
         signals.message.emit(f"[{index}/{total_pages}] Preparing OCR items for {Path(image_relative_path).name}")
         try:
             json_path = prepare_ocr_items_for_image(
@@ -618,6 +731,16 @@ def _run_ocr_preparation_task(
                 )
             )
             signals.message.emit(f"OCR items prepared: {json_path}")
+            signals.event.emit(
+                {
+                    "stage": "ocr_prepare",
+                    "event": "page_done",
+                    "image_relative_path": str(image_relative_path),
+                    "output_path": str(json_path),
+                    "page_index": index,
+                    "page_total": total_pages,
+                }
+            )
 
         signals.progress.emit(int((index / total_pages) * 100))
 
@@ -650,71 +773,102 @@ def _run_ocr_inference_task(
     if not task.image_relative_paths:
         raise ValueError("No OCR-prepared pages were provided for OCR inference.")
 
-    if not str(task.server_url).strip():
-        raise ValueError(
-            "PaddleOCR-VL server is not reachable. Start the llama.cpp server from the OCR tab first."
-        )
+    ocr_config = OCRConfig.from_value(task.config)
+    if not str(ocr_config.server_url).strip() and str(task.server_url).strip():
+        ocr_config.server_url = str(task.server_url).strip()
+    if float(task.timeout) > 0:
+        ocr_config.timeout = float(task.timeout)
 
     total_pages = len(task.image_relative_paths)
     page_results: list[OCRInferencePageResult] = []
+    signals.message.emit(f"Running OCR with {provider_label(ocr_config.ocr_provider)}")
     signals.message.emit(f"Starting OCR inference for {total_pages} page(s).")
     signals.progress.emit(0)
 
-    for page_index, image_relative_path in enumerate(task.image_relative_paths, start=1):
-        page_name = Path(image_relative_path).name
-        signals.message.emit(f"[{page_index}/{total_pages}] Running OCR for {page_name}")
+    provider = create_ocr_provider(ocr_config)
+    try:
+        provider.validate()
 
-        def on_item_progress(current: int, total: int, item_info: dict[str, Any]) -> None:
-            safe_total = max(int(total), 1)
-            progress_ratio = ((page_index - 1) + (min(int(current), safe_total) / safe_total)) / total_pages
-            signals.progress.emit(int(progress_ratio * 100))
-            item_message = str(item_info.get("message", "") or "").strip()
-            if item_message:
+        for page_index, image_relative_path in enumerate(task.image_relative_paths, start=1):
+            page_name = Path(image_relative_path).name
+            signals.event.emit(
+                {
+                    "stage": "ocr",
+                    "event": "page_start",
+                    "image_relative_path": str(image_relative_path),
+                    "page_index": page_index,
+                    "page_total": total_pages,
+                }
+            )
+            signals.message.emit(f"[{page_index}/{total_pages}] Running OCR for {page_name}")
+
+            def on_item_progress(current: int, total: int, item_info: dict[str, Any]) -> None:
+                safe_total = max(int(total), 1)
+                progress_ratio = ((page_index - 1) + (min(int(current), safe_total) / safe_total)) / total_pages
+                signals.progress.emit(int(progress_ratio * 100))
+                item_message = str(item_info.get("message", "") or "").strip()
+                if item_message:
+                    signals.message.emit(
+                        f"[{page_index}/{total_pages}] {page_name} "
+                        f"item {min(int(current), safe_total)}/{safe_total}: {item_message}"
+                    )
+
+            try:
+                json_path = run_ocr_for_page(
+                    task.project,
+                    image_relative_path,
+                    ocr_config.server_url,
+                    ocr_provider=ocr_config.ocr_provider,
+                    provider_config=ocr_config,
+                    provider_instance=provider,
+                    force=task.force,
+                    selected_item_ids=task.selected_item_ids_by_page.get(str(image_relative_path)),
+                    timeout=ocr_config.timeout,
+                    logger=signals.message.emit,
+                    progress_callback=on_item_progress,
+                )
+                ocr_data = load_ocr_json(json_path)
+                summary = summarize_ocr_items(ocr_data.get("items", []))
+            except Exception as exc:
+                readable_error = f"{page_name}: {exc}"
+                signals.message.emit(f"OCR inference failed: {readable_error}")
+                page_results.append(
+                    OCRInferencePageResult(
+                        image_relative_path=str(image_relative_path),
+                        json_path=None,
+                        error=str(exc),
+                        summary={},
+                    )
+                )
+            else:
+                page_results.append(
+                    OCRInferencePageResult(
+                        image_relative_path=str(image_relative_path),
+                        json_path=json_path,
+                        error=None,
+                        summary=summary,
+                    )
+                )
                 signals.message.emit(
-                    f"[{page_index}/{total_pages}] {page_name} "
-                    f"item {min(int(current), safe_total)}/{safe_total}: {item_message}"
+                    f"OCR complete for {page_name}: "
+                    f"{summary.get('done', 0)} done, {summary.get('error', 0)} error, "
+                    f"{summary.get('prepared', 0)} prepared."
+                )
+                signals.event.emit(
+                    {
+                        "stage": "ocr",
+                        "event": "page_done",
+                        "image_relative_path": str(image_relative_path),
+                        "output_path": str(json_path),
+                        "page_index": page_index,
+                        "page_total": total_pages,
+                        "summary": dict(summary),
+                    }
                 )
 
-        try:
-            json_path = run_ocr_for_page(
-                task.project,
-                image_relative_path,
-                task.server_url,
-                force=task.force,
-                selected_item_ids=task.selected_item_ids_by_page.get(str(image_relative_path)),
-                timeout=task.timeout,
-                logger=signals.message.emit,
-                progress_callback=on_item_progress,
-            )
-            ocr_data = load_ocr_json(json_path)
-            summary = summarize_ocr_items(ocr_data.get("items", []))
-        except Exception as exc:
-            readable_error = f"{page_name}: {exc}"
-            signals.message.emit(f"OCR inference failed: {readable_error}")
-            page_results.append(
-                OCRInferencePageResult(
-                    image_relative_path=str(image_relative_path),
-                    json_path=None,
-                    error=str(exc),
-                    summary={},
-                )
-            )
-        else:
-            page_results.append(
-                OCRInferencePageResult(
-                    image_relative_path=str(image_relative_path),
-                    json_path=json_path,
-                    error=None,
-                    summary=summary,
-                )
-            )
-            signals.message.emit(
-                f"OCR complete for {page_name}: "
-                f"{summary.get('done', 0)} done, {summary.get('error', 0)} error, "
-                f"{summary.get('prepared', 0)} prepared."
-            )
-
-        signals.progress.emit(int((page_index / total_pages) * 100))
+            signals.progress.emit(int((page_index / total_pages) * 100))
+    finally:
+        provider.close()
 
     successful_pages = [result for result in page_results if result.json_path is not None]
     if not successful_pages:
@@ -819,12 +973,16 @@ def _run_translation_task(
         raise ValueError("No pages were provided for translation.")
 
     total_pages = len(task.image_relative_paths)
+    translation_config = TranslationConfig.from_value(task.config)
     page_results_map: dict[str, TranslationPageResult] = {
         str(image_relative_path): TranslationPageResult(image_relative_path=str(image_relative_path))
         for image_relative_path in task.image_relative_paths
     }
 
     def on_progress(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("stage", "translation")
+        signals.event.emit(payload)
         event_name = str(event.get("event", "") or "")
         message = str(event.get("message", "") or "").strip()
         image_relative_path = str(event.get("image_relative_path", "") or "")
@@ -860,7 +1018,9 @@ def _run_translation_task(
             if event_name == "page_error":
                 page_result.error = message or "Unknown translation failure."
 
-    signals.message.emit(f"Starting translation for {total_pages} page(s).")
+    signals.message.emit(
+        f"Starting translation for {total_pages} page(s) with {translation_config.translator}."
+    )
     signals.progress.emit(0)
 
     if len(task.image_relative_paths) == 1:
@@ -1054,6 +1214,9 @@ def _run_inpaint_task(
     }
 
     def on_progress(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("stage", "inpaint")
+        signals.event.emit(payload)
         event_name = str(event.get("event", "") or "")
         message = str(event.get("message", "") or "").strip()
         image_relative_path = str(event.get("image_relative_path", "") or "")
@@ -1295,6 +1458,9 @@ def _run_render_task(
     }
 
     def on_progress(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("stage", "render")
+        signals.event.emit(payload)
         event_name = str(event.get("event", "") or "")
         message = str(event.get("message", "") or "").strip()
         image_relative_path = str(event.get("image_relative_path", "") or "")
@@ -1514,6 +1680,116 @@ def _run_lama_model_task(
         device=str(result.get("device", "") or ""),
         message=str(result.get("message", "") or ""),
     )
+
+
+def _run_export_task(
+    task: PipelineTask,
+    signals: WorkerSignals,
+) -> ExportWorkerResult:
+    if not isinstance(task, ExportTask):
+        raise TypeError("Export worker received an unexpected task type.")
+
+    if task.project is None:
+        raise ValueError("No project was provided for export.")
+
+    config = ExportConfig.from_value(task.config)
+    signals.message.emit(
+        f"Starting export: source={config.export_source}, scope={config.page_scope}, format={config.output_format}"
+    )
+    signals.progress.emit(0)
+
+    def on_progress(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("stage", "export")
+        signals.event.emit(payload)
+        message = str(event.get("message", "") or "").strip()
+        if message:
+            signals.message.emit(message)
+        try:
+            progress_value = int(event.get("progress", 0) or 0)
+        except Exception:
+            progress_value = 0
+        signals.progress.emit(max(0, min(100, progress_value)))
+
+    manifest = run_export(
+        task.project,
+        current_page=task.current_page,
+        selected_pages=task.selected_pages,
+        config=config,
+        logger=signals.message.emit,
+        progress_callback=on_progress,
+    )
+    signals.progress.emit(100)
+    signals.message.emit(
+        f"Export completed. Exported: {int(manifest.get('exported_count', 0) or 0)}, "
+        f"skipped: {int(manifest.get('skipped_count', 0) or 0)}, "
+        f"errors: {int(manifest.get('error_count', 0) or 0)}"
+    )
+    return ExportWorkerResult(manifest=manifest)
+
+
+def _run_process_task(
+    task: PipelineTask,
+    signals: WorkerSignals,
+) -> ProcessPipelineResult:
+    if not isinstance(task, ProcessTask):
+        raise TypeError("Process worker received an unexpected task type.")
+
+    if task.project is None:
+        raise ValueError("No project was provided for one-click processing.")
+
+    if not task.image_relative_paths:
+        raise ValueError("No pages were provided for one-click processing.")
+
+    scope_label = "chapter" if str(task.scope or "").strip().lower() != "current" else "current page"
+    thread_name = threading.current_thread().name
+    signals.message.emit(
+        f"Starting one-click process for {len(task.image_relative_paths)} page(s) "
+        f"({scope_label}, force={bool(task.force)}) on {thread_name}. Export is excluded."
+    )
+    signals.progress.emit(0)
+
+    cancel_token = task.cancel_token if hasattr(task, "cancel_token") else None
+    cancel_check = cancel_token.is_set if hasattr(cancel_token, "is_set") else None
+
+    def on_progress(event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("stage", "process")
+        signals.event.emit(payload)
+        try:
+            progress_value = int(payload.get("overall_progress", 0) or 0)
+        except Exception:
+            progress_value = 0
+        signals.progress.emit(max(0, min(100, progress_value)))
+
+    result = run_process_pipeline(
+        task.project,
+        task.image_relative_paths,
+        scope=task.scope,
+        force=task.force,
+        ocr_config=task.ocr_config,
+        translation_config=task.translation_config,
+        inpaint_settings=task.inpaint_settings,
+        render_config=task.render_config,
+        logger=signals.message.emit,
+        progress_callback=on_progress,
+        should_cancel=cancel_check,
+    )
+    if not result.canceled:
+        signals.progress.emit(100)
+
+    if result.canceled:
+        signals.message.emit("One-click process canceled by user.")
+    elif result.completed_with_errors:
+        signals.message.emit(
+            f"One-click process completed with errors. "
+            f"Succeeded: {result.succeeded_pages}, failed: {result.failed_pages}."
+        )
+    else:
+        signals.message.emit(
+            f"One-click process completed successfully for {result.succeeded_pages} page(s)."
+        )
+    return result
 
 
 def _status_to_task_result(status: LlamaServerStatus) -> LlamaServerTaskResult:

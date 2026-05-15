@@ -59,10 +59,19 @@ def load_render_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("item_count", 0)
     payload.setdefault("rendered_item_count", 0)
     payload.setdefault("skipped_item_count", 0)
+    payload.setdefault("no_text_page", False)
     payload.setdefault("status", "pending")
     payload.setdefault("error", "")
     payload.setdefault("created_at", "")
     payload.setdefault("updated_at", "")
+    payload.setdefault("edited", False)
+    payload.setdefault("edited_at", "")
+    payload.setdefault("needs_render", False)
+    payload["downstream_stale"] = (
+        list(payload.get("downstream_stale", []) or [])
+        if isinstance(payload.get("downstream_stale", []), list)
+        else []
+    )
     settings = payload.get("settings", {})
     if not isinstance(settings, dict):
         settings = {}
@@ -90,7 +99,8 @@ def save_render_json(path: Path | str, data: dict[str, Any]) -> Path:
     json_path = ensure_path(path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     settings = data.get("settings", {}) if isinstance(data.get("settings", {}), dict) else {}
-    payload = {
+    payload = {str(key): value for key, value in dict(data).items()}
+    payload.update({
         "schema_version": int(data.get("schema_version", RENDER_SCHEMA_VERSION)),
         "stage": "render",
         "source_image": str(data.get("source_image", "")),
@@ -103,10 +113,15 @@ def save_render_json(path: Path | str, data: dict[str, Any]) -> Path:
         "item_count": int(data.get("item_count", 0) or 0),
         "rendered_item_count": int(data.get("rendered_item_count", 0) or 0),
         "skipped_item_count": int(data.get("skipped_item_count", 0) or 0),
+        "no_text_page": bool(data.get("no_text_page", False)),
         "status": str(data.get("status", "pending") or "pending"),
         "error": str(data.get("error", "") or ""),
         "created_at": str(data.get("created_at", "") or ""),
         "updated_at": str(data.get("updated_at", "") or ""),
+        "edited": bool(data.get("edited", False)),
+        "edited_at": str(data.get("edited_at", "") or ""),
+        "needs_render": bool(data.get("needs_render", False)),
+        "downstream_stale": list(data.get("downstream_stale", []) or []),
         "settings": {
             "font_name": str(settings.get("font_name", "") or ""),
             "font_path": str(settings.get("font_path", "") or ""),
@@ -124,7 +139,7 @@ def save_render_json(path: Path | str, data: dict[str, Any]) -> Path:
             "force": bool(settings.get("force", False)),
         },
         "items": [normalize_render_item(item) for item in data.get("items", [])],
-    }
+    })
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return json_path
 
@@ -136,9 +151,13 @@ def summarize_render_json(data: dict[str, Any]) -> dict[str, int | str]:
         "rendered": 0,
         "skipped": 0,
         "error": 0,
+        "excluded": 0,
     }
     for item in data.get("items", []):
         if not isinstance(item, dict):
+            continue
+        if bool(item.get("excluded", False)):
+            summary["excluded"] = int(summary["excluded"]) + 1
             continue
         summary["total"] = int(summary["total"]) + 1
         status = str(item.get("status", "") or "").strip().lower()
@@ -159,6 +178,7 @@ def normalize_render_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     normalized.setdefault("id", 0)
     normalized.setdefault("translation_item_id", 0)
     normalized.setdefault("ocr_item_id", 0)
+    normalized.setdefault("canon_id", "")
     normalized.setdefault("kind", "")
     normalized.setdefault("source_text", "")
     normalized.setdefault("translated_text", "")
@@ -174,6 +194,10 @@ def normalize_render_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     normalized.setdefault("sprite_transform", {})
     normalized.setdefault("status", "pending")
     normalized.setdefault("error", "")
+    normalized.setdefault("excluded", False)
+    normalized.setdefault("bbox_edited", False)
+    normalized.setdefault("bbox_edited_at", "")
+    normalized.setdefault("needs_render", False)
     return normalized
 
 

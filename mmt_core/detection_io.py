@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult, TextRegion
 
@@ -41,6 +41,7 @@ def save_detection_result(
     detection_json_output_path: Path | str,
     mask_output_dir: Path | str,
     project_root: Path | str | None = None,
+    logger: Callable[[str], None] | None = None,
 ) -> Path:
     """Serialize a detection result to JSON and any bubble masks to disk."""
 
@@ -87,8 +88,10 @@ def save_detection_result(
     for layout_index, layout_region in enumerate(result.layout_regions):
         payload["layout_regions"].append(_serialize_layout_region(layout_region, region_id=layout_index))
 
-    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return output_path
+    from .canon_state import ensure_canon_state
+
+    ensure_canon_state(payload, image_shape=image_shape, logger=logger)
+    return save_detection_json(output_path, payload)
 
 
 def load_detection_json(path: Path | str) -> dict[str, Any]:
@@ -110,7 +113,7 @@ def load_detection_json(path: Path | str) -> dict[str, Any]:
         value = payload.get(key, [])
         if not isinstance(value, list):
             raise ValueError(f"Detection cache field '{key}' must be a list in {detection_path}")
-        payload[key] = value
+        payload[key] = [_normalize_detection_region(item) for item in value if isinstance(item, dict)]
 
     payload.setdefault("schema_version", DETECTION_SCHEMA_VERSION)
     payload.setdefault("method", "")
@@ -118,7 +121,57 @@ def load_detection_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("source_image", "")
     payload.setdefault("image_width", 0)
     payload.setdefault("image_height", 0)
+    payload.setdefault("edited", False)
+    payload.setdefault("edited_at", "")
+    downstream_stale = payload.get("downstream_stale", [])
+    payload["downstream_stale"] = downstream_stale if isinstance(downstream_stale, list) else []
+    canon_state = payload.get("canon_state")
+    if isinstance(canon_state, dict):
+        from .canon_state import ensure_canon_state
+
+        ensure_canon_state(payload)
     return payload
+
+
+def save_detection_json(path: Path | str, data: dict[str, Any]) -> Path:
+    """Persist a full detection JSON payload to disk."""
+
+    output_path = ensure_path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        str(key): _json_safe(value)
+        for key, value in dict(data).items()
+    }
+    payload.update(
+        {
+            "schema_version": int(data.get("schema_version", DETECTION_SCHEMA_VERSION)),
+            "stage": "detection",
+            "source_image": str(data.get("source_image", "") or ""),
+            "image_width": int(data.get("image_width", 0) or 0),
+            "image_height": int(data.get("image_height", 0) or 0),
+            "method": str(data.get("method", "") or ""),
+            "stats": _json_safe(data.get("stats", {})),
+            "bubbles": [_normalize_detection_region(item) for item in data.get("bubbles", []) if isinstance(item, dict)],
+            "text_regions": [
+                _normalize_detection_region(item)
+                for item in data.get("text_regions", [])
+                if isinstance(item, dict)
+            ],
+            "layout_regions": [
+                _normalize_detection_region(item)
+                for item in data.get("layout_regions", [])
+                if isinstance(item, dict)
+            ],
+            "edited": bool(data.get("edited", False)),
+            "edited_at": str(data.get("edited_at", "") or ""),
+            "downstream_stale": list(data.get("downstream_stale", []) or []),
+        }
+    )
+    canon_state = data.get("canon_state")
+    if isinstance(canon_state, dict):
+        payload["canon_state"] = _json_safe(canon_state)
+    output_path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
+    return output_path
 
 
 def _serialize_bubble(
@@ -181,6 +234,14 @@ def _save_bubble_mask(
 
 def _bbox_to_list(bbox: Sequence[int | float]) -> list[int]:
     return [int(value) for value in bbox[:4]]
+
+
+def _normalize_detection_region(region: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(region)
+    normalized["manual"] = bool(normalized.get("manual", False))
+    normalized["excluded"] = bool(normalized.get("excluded", False))
+    normalized.setdefault("source", normalized.get("detector") or "unknown")
+    return normalized
 
 
 def _json_safe(value: Any) -> Any:

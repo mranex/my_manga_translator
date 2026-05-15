@@ -48,6 +48,7 @@ def run_detection_for_image(
         detection_json_output_path=detection_json_path,
         mask_output_dir=page_mask_dir,
         project_root=project_root,
+        logger=logger,
     )
     _log(logger, f"Saved detection cache: {output_path}")
     return output_path

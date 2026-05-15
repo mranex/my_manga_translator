@@ -14,6 +14,8 @@ from text_rendering import (
     get_cached_font,
 )
 
+from .canon_state import canon_item_bbox, ensure_canon_state, get_canon_item, resolve_canon_item_for_stage_item
+from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import load_image_bgr, project_relative_path, save_png_image
 from .inpaint_io import inpaint_image_path
 from .ocr_io import load_ocr_json, ocr_json_path
@@ -59,27 +61,53 @@ def prepare_render_for_page(
     """Build render metadata from cached translation/OCR and inpaint outputs."""
 
     image_relative = str(Path(image_relative_path).as_posix())
+    detection_path = detection_json_path(project, image_relative)
+    if not detection_path.exists():
+        raise FileNotFoundError(
+            f"Detection cache is missing for {Path(image_relative).name}. Run Detection first."
+        )
+    detection_data = load_detection_json(detection_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
+    canon_state = detection_data["canon_state"]
+    active_canon_items = _active_renderable_canon_items(canon_state)
+    no_text_page = len(active_canon_items) == 0
+
     inpaint_path = inpaint_image_path(project, image_relative)
-    if not inpaint_path.exists():
-        raise FileNotFoundError(
-            f"Inpaint output is missing for {Path(image_relative).name}. Run Inpaint first."
-        )
-
     translation_path = translation_json_path(project, image_relative)
-    if not translation_path.exists():
-        raise FileNotFoundError(
-            f"Translation cache is missing for {Path(image_relative).name}. Run Translation first."
-        )
-
-    translation_data = load_translation_json(translation_path)
     ocr_path = ocr_json_path(project, image_relative)
     ocr_data = load_ocr_json(ocr_path) if ocr_path.exists() else None
-    inpaint_image = load_image_bgr(inpaint_path)
+    translation_data: dict[str, Any] = {"source_image": image_relative, "items": []}
+    base_image = None
 
-    render_items = build_render_items_from_translation(
-        translation_data,
-        ocr_data,
-        inpaint_image.shape,
+    if no_text_page:
+        _log(logger, f"Render no-op preparation for {Path(image_relative).name}: no active text items found.")
+        _base_path, base_image = _resolve_render_base_image(project, image_relative)
+        if translation_path.exists():
+            translation_data = load_translation_json(translation_path)
+    else:
+        if not inpaint_path.exists():
+            raise FileNotFoundError(
+                f"Inpaint output is missing for {Path(image_relative).name}. Run Inpaint first."
+            )
+        if not translation_path.exists():
+            raise FileNotFoundError(
+                f"Translation cache is missing for {Path(image_relative).name}. Run Translation first."
+            )
+        translation_data = load_translation_json(translation_path)
+        base_image = load_image_bgr(inpaint_path)
+
+    render_items = (
+        []
+        if no_text_page
+        else build_render_items_from_translation(
+            translation_data,
+            ocr_data,
+            canon_state,
+            base_image.shape,
+        )
     )
 
     existing_data = None
@@ -94,15 +122,16 @@ def prepare_render_for_page(
         "schema_version": RENDER_SCHEMA_VERSION,
         "stage": "render",
         "source_image": str(translation_data.get("source_image", "") or image_relative),
-        "inpaint_image_path": project_relative_path(project.root_dir, inpaint_path),
-        "translation_cache_path": project_relative_path(project.root_dir, translation_path),
+        "inpaint_image_path": project_relative_path(project.root_dir, inpaint_path) if inpaint_path.exists() else "",
+        "translation_cache_path": project_relative_path(project.root_dir, translation_path) if translation_path.exists() else "",
         "ocr_cache_path": project_relative_path(project.root_dir, ocr_path) if ocr_path.exists() else "",
         "output_image_path": project_relative_path(project.root_dir, render_image_path(project, image_relative)),
-        "image_width": int(inpaint_image.shape[1]),
-        "image_height": int(inpaint_image.shape[0]),
+        "image_width": int(base_image.shape[1]),
+        "image_height": int(base_image.shape[0]),
         "item_count": len(render_items),
         "rendered_item_count": 0,
         "skipped_item_count": len([item for item in render_items if item.get("status") == "skipped"]),
+        "no_text_page": no_text_page,
         "status": "pending",
         "error": "",
         "created_at": str((existing_data or {}).get("created_at", "") or timestamp()),
@@ -161,6 +190,7 @@ def run_render_for_page(
         and output_image.exists()
         and existing_metadata is not None
         and str(existing_metadata.get("status", "") or "").strip().lower() == "done"
+        and not bool(existing_metadata.get("needs_render", False))
     ):
         _log(logger, f"Reusing cached render output: {output_image}")
         _emit_progress(
@@ -173,8 +203,20 @@ def run_render_for_page(
         )
         return output_image
 
-    metadata_path = prepare_render_for_page(project, image_relative, force=force, logger=logger)
-    metadata = load_render_json(metadata_path)
+    metadata = existing_metadata
+    metadata_path = output_json
+    preserve_existing_metadata = bool(
+        metadata is not None
+        and (
+            bool(metadata.get("edited", False))
+            or bool(metadata.get("needs_render", False))
+        )
+    )
+    if metadata is None or not preserve_existing_metadata:
+        metadata_path = prepare_render_for_page(project, image_relative, force=force, logger=logger)
+        metadata = load_render_json(metadata_path)
+    else:
+        metadata = load_render_json(metadata_path)
     config = RenderConfig(
         font_name=str(font_name or ""),
         font_path=str(font_path or ""),
@@ -200,7 +242,31 @@ def run_render_for_page(
     metadata["status"] = "running"
     metadata["error"] = ""
     metadata["updated_at"] = timestamp()
+    metadata["needs_render"] = False
     save_render_json(metadata_path, metadata)
+
+    detection_path = detection_json_path(project, image_relative)
+    if not detection_path.exists():
+        raise FileNotFoundError(
+            f"Detection cache is missing for {Path(image_relative).name}. Run Detection first."
+        )
+    detection_data = load_detection_json(detection_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
+    canon_state = detection_data["canon_state"]
+    active_canon_items = _active_renderable_canon_items(canon_state)
+    if not active_canon_items:
+        output_path = _finalize_no_text_render_output(
+            project,
+            image_relative,
+            metadata,
+            metadata_path,
+            logger=logger,
+            progress_callback=progress_callback,
+        )
+        return output_path
 
     inpaint_path = project.root_dir / str(metadata.get("inpaint_image_path", "") or "")
     if not inpaint_path.exists():
@@ -215,17 +281,62 @@ def run_render_for_page(
             existing_sprite.unlink()
     if save_sprites:
         sprite_directory.mkdir(parents=True, exist_ok=True)
+    metadata["no_text_page"] = False
 
     items = [normalize_render_item(item) for item in metadata.get("items", [])]
-    renderable_items = [item for item in items if str(item.get("status", "") or "").lower() != "skipped"]
+    unresolved_item_ids: list[int] = []
+    for index, item in enumerate(items):
+        canon_item = resolve_canon_item_for_stage_item(canon_state, item, active_only=False)
+        if canon_item is None:
+            unresolved_item_ids.append(int(item.get("id", index)))
+            continue
+        item["canon_id"] = str(canon_item.get("canon_id", "") or "")
+        item["bbox"] = canon_item_bbox(canon_item, "bbox")
+        item["render_bbox"] = canon_item_bbox(canon_item, "render_bbox")
+        item["excluded"] = not bool(canon_item.get("enabled", True))
+    if unresolved_item_ids:
+        unresolved_text = ", ".join(str(item_id) for item_id in unresolved_item_ids[:5])
+        raise RuntimeError(
+            f"Render cache for {Path(image_relative).name} could not be matched to canon_state "
+            f"(item ids: {unresolved_text}). Re-prepare Render first."
+        )
+    renderable_items = [
+        item
+        for item in items
+        if not bool(item.get("excluded", False))
+        and str(item.get("status", "") or "").lower() != "skipped"
+    ]
     if not renderable_items:
         raise RuntimeError("No translated text is available to render for this page.")
 
     rendered_count = 0
-    skipped_count = len([item for item in items if str(item.get("status", "") or "").lower() == "skipped"])
+    skipped_count = len(
+        [
+            item
+            for item in items
+            if bool(item.get("excluded", False)) or str(item.get("status", "") or "").lower() == "skipped"
+        ]
+    )
     for item_index, item in enumerate(items):
-        if str(item.get("status", "") or "").lower() == "skipped":
+        if bool(item.get("excluded", False)) or str(item.get("status", "") or "").lower() == "skipped":
             continue
+
+        canon_id = str(item.get("canon_id", "") or "").strip()
+        if not canon_id:
+            raise RuntimeError(
+                f"Render item {item.get('id', item_index)} on {Path(image_relative).name} is missing canon_id. "
+                "Re-prepare Render first."
+            )
+        canon_item = get_canon_item(canon_state, canon_id)
+        if not bool(canon_item.get("enabled", True)):
+            item["excluded"] = True
+            skipped_count += 1
+            metadata["items"] = items
+            metadata["skipped_item_count"] = skipped_count
+            save_render_json(metadata_path, metadata)
+            continue
+        item["bbox"] = canon_item_bbox(canon_item, "bbox")
+        item["render_bbox"] = canon_item_bbox(canon_item, "render_bbox")
 
         render_bbox = clamp_bbox_to_image(item.get("render_bbox"), base_image.shape)
         translated_text = str(item.get("translated_text", "") or "").strip()
@@ -294,6 +405,7 @@ def run_render_for_page(
         }
         item["status"] = "rendered"
         item["error"] = str(render_details.get("warning", "") or "")
+        item["needs_render"] = False
 
         if save_sprites:
             sprite_path = sprite_directory / f"item_{item_index:03d}.png"
@@ -320,6 +432,7 @@ def run_render_for_page(
         metadata["items"] = items
         metadata["status"] = "error"
         metadata["error"] = "No translated text could be rendered for this page."
+        metadata["no_text_page"] = False
         metadata["updated_at"] = timestamp()
         save_render_json(metadata_path, metadata)
         raise RuntimeError(metadata["error"])
@@ -328,10 +441,12 @@ def run_render_for_page(
     metadata["items"] = items
     metadata["status"] = "done"
     metadata["error"] = ""
+    metadata["no_text_page"] = False
     metadata["output_image_path"] = project_relative_path(project.root_dir, output_image)
     metadata["rendered_item_count"] = rendered_count
     metadata["skipped_item_count"] = skipped_count
     metadata["updated_at"] = timestamp()
+    metadata["needs_render"] = False
     save_render_json(metadata_path, metadata)
 
     _emit_progress(
@@ -410,9 +525,10 @@ def run_render_for_pages(
 def build_render_items_from_translation(
     translation_data: dict[str, Any],
     ocr_data: dict[str, Any] | None,
+    canon_state: dict[str, Any],
     image_shape: Sequence[int],
 ) -> list[dict[str, Any]]:
-    """Build lightweight render items from cached translation and OCR JSON."""
+    """Build lightweight render items from cached translation/OCR plus canon_state."""
 
     ocr_items_by_id: dict[int, dict[str, Any]] = {}
     if isinstance(ocr_data, dict):
@@ -436,32 +552,30 @@ def build_render_items_from_translation(
         except Exception:
             ocr_item_id = item_index
         ocr_item = ocr_items_by_id.get(ocr_item_id, {})
+        canon_item = resolve_canon_item_for_stage_item(canon_state, normalized_translation_item, active_only=False)
+        if canon_item is None and ocr_item:
+            canon_item = resolve_canon_item_for_stage_item(canon_state, ocr_item, active_only=False)
+        if canon_item is None or not bool(canon_item.get("enabled", True)):
+            continue
         kind = str(normalized_translation_item.get("kind") or ocr_item.get("kind") or "")
         translated_text = str(normalized_translation_item.get("translated_text", "") or "").strip()
-        render_bbox = choose_render_bbox(
-            kind=kind,
-            image_shape=image_shape,
-            translation_bbox=normalized_translation_item.get("bbox"),
-            translation_ocr_bbox=normalized_translation_item.get("ocr_bbox"),
-            ocr_bbox=ocr_item.get("ocr_bbox"),
-            ocr_item_bbox=ocr_item.get("bbox"),
+        render_bbox = clamp_bbox_to_image(
+            canon_item_bbox(canon_item, "render_bbox"),
+            image_shape,
         )
+        base_bbox = clamp_bbox_to_image(canon_item_bbox(canon_item, "bbox"), image_shape)
 
         item_payload = {
             "id": item_index,
             "translation_item_id": int(normalized_translation_item.get("id", item_index) or item_index),
             "ocr_item_id": ocr_item_id,
+            "canon_id": str(canon_item.get("canon_id", "") or ""),
             "kind": kind,
             "source_text": str(normalized_translation_item.get("source_text", "") or ""),
             "translated_text": translated_text,
-            "bbox": bbox_to_list(
-                clamp_bbox_to_image(
-                    normalized_translation_item.get("bbox") or ocr_item.get("bbox"),
-                    image_shape,
-                )
-            ),
+            "bbox": bbox_to_list(base_bbox),
             "render_bbox": bbox_to_list(render_bbox),
-            "source_direction": str(ocr_item.get("source_direction", "") or ""),
+            "source_direction": str(canon_item.get("source_direction", "") or ocr_item.get("source_direction", "") or ""),
             "writing_mode": "horizontal",
             "font_size": 0,
             "font_path": "",
@@ -472,6 +586,8 @@ def build_render_items_from_translation(
             "sprite_transform": {},
             "status": "pending",
             "error": "",
+            # Snapshot only. canon_state remains the source of truth.
+            "excluded": False,
         }
 
         if not translated_text:
@@ -483,6 +599,86 @@ def build_render_items_from_translation(
         render_items.append(normalize_render_item(item_payload))
 
     return render_items
+
+
+def _active_renderable_canon_items(canon_state: dict[str, Any]) -> list[dict[str, Any]]:
+    items = canon_state.get("items", []) if isinstance(canon_state, dict) else []
+    active_items: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("enabled", True)):
+            continue
+        active_items.append(item)
+    return active_items
+
+
+def _resolve_render_base_image(project: ProjectLike, image_relative_path: str) -> tuple[Path, Any]:
+    inpaint_path = inpaint_image_path(project, image_relative_path)
+    if inpaint_path.exists():
+        return inpaint_path, load_image_bgr(inpaint_path)
+
+    source_path = project.root_dir / image_relative_path
+    if source_path.exists():
+        return source_path, load_image_bgr(source_path)
+
+    raise FileNotFoundError(
+        f"No base image is available for {Path(image_relative_path).name}. "
+        "Expected an inpaint output or the source image."
+    )
+
+
+def _finalize_no_text_render_output(
+    project: ProjectLike,
+    image_relative_path: str,
+    metadata: dict[str, Any],
+    metadata_path: Path,
+    *,
+    logger: Logger | None,
+    progress_callback: ProgressCallback | None,
+) -> Path:
+    base_image_path, base_image = _resolve_render_base_image(project, image_relative_path)
+    output_image = render_image_path(project, image_relative_path)
+    save_png_image(base_image, output_image)
+
+    inpaint_path = inpaint_image_path(project, image_relative_path)
+    translation_path = translation_json_path(project, image_relative_path)
+    ocr_path = ocr_json_path(project, image_relative_path)
+
+    metadata["source_image"] = str(metadata.get("source_image", "") or image_relative_path)
+    metadata["inpaint_image_path"] = project_relative_path(project.root_dir, inpaint_path) if inpaint_path.exists() else ""
+    metadata["translation_cache_path"] = (
+        project_relative_path(project.root_dir, translation_path) if translation_path.exists() else ""
+    )
+    metadata["ocr_cache_path"] = project_relative_path(project.root_dir, ocr_path) if ocr_path.exists() else ""
+    metadata["output_image_path"] = project_relative_path(project.root_dir, output_image)
+    metadata["image_width"] = int(base_image.shape[1])
+    metadata["image_height"] = int(base_image.shape[0])
+    metadata["item_count"] = 0
+    metadata["items"] = []
+    metadata["status"] = "done"
+    metadata["error"] = ""
+    metadata["no_text_page"] = True
+    metadata["rendered_item_count"] = 0
+    metadata["skipped_item_count"] = 0
+    metadata["updated_at"] = timestamp()
+    metadata["needs_render"] = False
+    save_render_json(metadata_path, metadata)
+
+    message = (
+        f"Render no-op: no active text items found for {Path(image_relative_path).name}. "
+        f"Used {base_image_path.name} as the base image."
+    )
+    _emit_progress(
+        progress_callback,
+        event="page_done",
+        image_relative_path=image_relative_path,
+        output_path=str(output_image),
+        summary=summarize_render_json(metadata),
+        message=message,
+    )
+    _log(logger, message)
+    return output_image
 
 
 def _render_item_sprite(

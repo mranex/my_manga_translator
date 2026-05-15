@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 TEXT_LIKE_LAYOUT_LABEL_PARTS = ("text", "title", "caption", "content")
@@ -26,18 +27,33 @@ def build_ocr_items_from_detection(
     without changing the file-backed OCR cache contract.
     """
 
-    bubbles = detection_data.get("bubbles", [])
-    text_regions = detection_data.get("text_regions", [])
-    layout_regions = detection_data.get("layout_regions", [])
+    bubbles = [bubble for bubble in detection_data.get("bubbles", []) if not bool(bubble.get("excluded", False))]
+    text_regions = [
+        text_region
+        for text_region in detection_data.get("text_regions", [])
+        if not bool(text_region.get("excluded", False))
+    ]
+    layout_regions = [
+        layout_region
+        for layout_region in detection_data.get("layout_regions", [])
+        if not bool(layout_region.get("excluded", False))
+    ]
 
     bubble_items: list[dict[str, Any]] = []
     outside_items: list[dict[str, Any]] = []
     existing_non_bubble_boxes: list[tuple[int, int, int, int]] = []
+    page_name = Path(str(detection_data.get("source_image", "") or "page")).name or "page"
 
     for bubble_index, bubble in enumerate(bubbles):
         bubble_id = _coerce_int(bubble.get("id"), bubble_index)
         bubble_bbox = clamp_bbox_to_image(bubble.get("bbox"), image_shape)
         if bubble_bbox is None:
+            if logger is not None:
+                logger(
+                    "[ocr_items] Skipping invalid bubble candidate "
+                    f"on {page_name}: bbox={bubble.get('bbox')!r}, "
+                    f"source={bubble.get('detector') or bubble.get('source') or 'detector'}"
+                )
             continue
 
         matched_text_regions = [
@@ -94,6 +110,12 @@ def build_ocr_items_from_detection(
     for region_index, text_region in enumerate(ordered_unmatched_text_regions):
         region_bbox = clamp_bbox_to_image(text_region.get("bbox"), image_shape)
         if region_bbox is None:
+            if logger is not None:
+                logger(
+                    "[ocr_items] Skipping invalid text-region candidate "
+                    f"on {page_name}: bbox={text_region.get('bbox')!r}, "
+                    f"source={text_region.get('detector') or text_region.get('source') or 'detector'}"
+                )
             continue
 
         ocr_bbox = expand_bbox(region_bbox, image_shape, 16)
@@ -125,6 +147,12 @@ def build_ocr_items_from_detection(
 
         layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
         if layout_bbox is None:
+            if logger is not None:
+                logger(
+                    "[ocr_items] Skipping invalid layout candidate "
+                    f"on {page_name}: bbox={layout_region.get('bbox')!r}, "
+                    f"source={layout_region.get('detector') or layout_region.get('source') or 'detector'}"
+                )
             continue
 
         if is_huge_bbox(layout_bbox, image_shape, max_region_ratio=0.35):
@@ -172,6 +200,77 @@ def build_ocr_items_from_detection(
         )
 
     return all_items
+
+
+def build_ocr_items_from_canon_state(
+    detection_json_or_state: dict[str, Any],
+    image_shape: Sequence[int],
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Build OCR items from active canon_state workflow items."""
+
+    from .canon_state import get_active_canon_items
+
+    canon_items = get_active_canon_items(detection_json_or_state)
+    ordered_items = sorted(
+        canon_items,
+        key=lambda entry: sort_key_for_region(
+            entry.get("ocr_bbox") or entry.get("bbox"),
+            entry.get("reading_order"),
+        ),
+    )
+
+    ocr_items: list[dict[str, Any]] = []
+    counts_by_kind: dict[str, int] = {}
+    for item_id, canon_item in enumerate(ordered_items):
+        bbox = clamp_bbox_to_image(canon_item.get("bbox"), image_shape)
+        ocr_bbox = clamp_bbox_to_image(canon_item.get("ocr_bbox") or canon_item.get("bbox"), image_shape)
+        if bbox is None and ocr_bbox is None:
+            continue
+        if bbox is None:
+            bbox = ocr_bbox
+        if ocr_bbox is None:
+            ocr_bbox = bbox
+        if bbox is None or ocr_bbox is None:
+            continue
+
+        kind = str(canon_item.get("kind", "") or "")
+        counts_by_kind[kind] = counts_by_kind.get(kind, 0) + 1
+        detector_refs = canon_item.get("detector_refs", {})
+        metadata = canon_item.get("metadata", {})
+        detector_sources = metadata.get("detector_sources", []) if isinstance(metadata, dict) else []
+        if not isinstance(detector_sources, list):
+            detector_sources = []
+
+        ocr_items.append(
+            {
+                "id": item_id,
+                "canon_id": str(canon_item.get("canon_id", "") or ""),
+                "kind": kind,
+                "bbox": bbox_to_list(bbox),
+                "ocr_bbox": bbox_to_list(ocr_bbox),
+                "crop_path": None,
+                "bubble_id": detector_refs.get("bubble_id") if isinstance(detector_refs, dict) else None,
+                "reading_order": canon_item.get("reading_order"),
+                "detector_sources": [str(value) for value in detector_sources if str(value).strip()],
+                "source_direction": str(
+                    canon_item.get("source_direction", "") or infer_source_direction(ocr_bbox)
+                ),
+                "text": "",
+                "status": "prepared",
+                # Snapshot only. canon_state remains the source of truth.
+                "excluded": False,
+            }
+        )
+
+    if logger is not None:
+        counts_text = ", ".join(
+            f"{count} {kind}" for kind, count in sorted(counts_by_kind.items())
+        ) or "0 items"
+        logger(f"Prepared OCR items from canon_state: {counts_text}")
+
+    return ocr_items
 
 
 def clamp_bbox_to_image(
@@ -368,6 +467,7 @@ __all__ = [
     "bbox_area",
     "bbox_intersection_area",
     "bbox_to_list",
+    "build_ocr_items_from_canon_state",
     "build_ocr_items_from_detection",
     "clamp_bbox_to_image",
     "crop_image_to_bbox",

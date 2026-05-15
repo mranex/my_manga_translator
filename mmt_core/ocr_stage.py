@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .detection_io import detection_json_path, load_detection_json
+from .canon_state import canon_item_bbox, ensure_canon_state, get_canon_item, resolve_canon_item_for_stage_item
+from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import load_image_bgr, project_relative_path, save_png_image
+from .ocr_models import DEFAULT_OCR_PROVIDER, OCRConfig
 from .ocr_io import (
     load_ocr_json,
     normalize_ocr_item,
@@ -17,8 +19,9 @@ from .ocr_io import (
     save_ocr_items_result,
     save_ocr_payload,
 )
-from .ocr_items import build_ocr_items_from_detection, crop_image_to_bbox
-from .paddleocr_vl_client import PaddleOCRVLClient, PaddleOCRVLClientError
+from .ocr_items import build_ocr_items_from_canon_state, crop_image_to_bbox
+from .paddleocr_vl_client import PaddleOCRVLClientError
+from .ocr_providers import OCRProvider, OCRProviderError, create_ocr_provider
 
 
 ProgressCallback = Callable[[int, int, dict[str, Any]], None]
@@ -31,7 +34,7 @@ def prepare_ocr_items_for_image(
     save_crops: bool = True,
     logger: Callable[[str], None] | None = None,
 ) -> Path:
-    """Prepare OCR items and crop files from cached detection JSON."""
+    """Prepare OCR items and crop files from cached detection JSON canon_state."""
 
     relative_path = Path(str(image_relative_path))
     source_image_path = project.root_dir / relative_path
@@ -56,9 +59,13 @@ def prepare_ocr_items_for_image(
 
     _log(logger, f"Loading source image for OCR prep: {source_image_path.name}")
     image = load_image_bgr(source_image_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data, image_shape=image.shape)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
 
-    _log(logger, f"Preparing OCR items from detection cache: {relative_path.name}")
-    items = build_ocr_items_from_detection(detection_data, image.shape, logger=logger)
+    _log(logger, f"Preparing OCR items from canon_state: {relative_path.name}")
+    items = build_ocr_items_from_canon_state(detection_data["canon_state"], image.shape, logger=logger)
 
     if save_crops:
         if crop_dir.exists():
@@ -91,14 +98,18 @@ def prepare_ocr_items_for_image(
 def run_ocr_for_page(
     project,
     image_relative_path,
-    server_url: str,
+    server_url: str | None = None,
+    *,
+    ocr_provider: str = DEFAULT_OCR_PROVIDER,
+    provider_config: OCRConfig | dict[str, Any] | None = None,
+    provider_instance: OCRProvider | None = None,
     force: bool = False,
     selected_item_ids: Sequence[int] | None = None,
     timeout: float = 120,
     logger: Callable[[str], None] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> Path:
-    """Run OCR inference for one prepared page via the persistent llama.cpp server."""
+    """Run OCR inference for one prepared page using the selected OCR provider."""
 
     relative_path = Path(str(image_relative_path))
     ocr_path = ocr_json_path(project, relative_path)
@@ -107,132 +118,213 @@ def run_ocr_for_page(
             f"OCR items are not prepared for {relative_path.name}. Prepare OCR items first."
         )
 
+    detection_path = detection_json_path(project, relative_path)
+    if not detection_path.exists():
+        raise RuntimeError(
+            f"Detection cache is missing for {relative_path.name}. Run Detection first."
+        )
+
     payload = load_ocr_json(ocr_path)
     raw_items = payload.get("items", [])
     if not isinstance(raw_items, list):
         raise ValueError(f"OCR cache field 'items' must be a list in {ocr_path}")
 
     payload["items"] = [normalize_ocr_item(item) for item in raw_items]
+    detection_data = load_detection_json(detection_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
+    canon_state = detection_data["canon_state"]
+
+    source_image_path = project.root_dir / relative_path
+    if not source_image_path.exists():
+        raise FileNotFoundError(f"Source image does not exist: {source_image_path}")
+    source_image = load_image_bgr(source_image_path)
+    crop_dir = ocr_crop_dir_for_page(project, relative_path)
+    crop_dir.mkdir(parents=True, exist_ok=True)
+
+    config = OCRConfig.from_value(provider_config)
+    config.ocr_provider = str(ocr_provider or config.ocr_provider or DEFAULT_OCR_PROVIDER)
+    if server_url is not None:
+        config.server_url = str(server_url or "").strip()
+    if timeout:
+        config.timeout = float(timeout)
+
     target_item_ids = _normalize_selected_item_ids(selected_item_ids)
+    unresolved_item_ids: list[int] = []
+    for index, item in enumerate(payload["items"]):
+        if not isinstance(item, dict):
+            continue
+        if target_item_ids is not None and _safe_int(item.get("id")) not in target_item_ids:
+            continue
+        canon_item = resolve_canon_item_for_stage_item(canon_state, item, active_only=False)
+        if canon_item is None:
+            unresolved_item_ids.append(_safe_int(item.get("id")) or index)
+            continue
+        item["canon_id"] = str(canon_item.get("canon_id", "") or "")
+        item["bbox"] = canon_item_bbox(canon_item, "bbox")
+        item["ocr_bbox"] = canon_item_bbox(canon_item, "ocr_bbox")
+        item["excluded"] = not bool(canon_item.get("enabled", True))
+
+    if unresolved_item_ids:
+        unresolved_text = ", ".join(str(item_id) for item_id in unresolved_item_ids[:5])
+        raise RuntimeError(
+            f"OCR cache for {relative_path.name} could not be matched to canon_state "
+            f"(item ids: {unresolved_text}). Re-prepare OCR items first."
+        )
+
     items_to_process = [
         item
         for item in payload["items"]
+        if not bool(item.get("excluded", False))
         if target_item_ids is None or _safe_int(item.get("id")) in target_item_ids
     ]
     if not items_to_process:
         _log(logger, f"No OCR items selected for {relative_path.name}; nothing to run.")
         return save_ocr_payload(payload, ocr_path)
 
-    client = PaddleOCRVLClient(server_url=server_url, timeout=timeout)
-    _log(logger, f"Checking PaddleOCR-VL server for {relative_path.name}: {client.server_url}")
-    client.check_server()
-
     total_items = len(items_to_process)
-    _log(logger, f"Running OCR for {relative_path.name}: {total_items} item(s)")
+    provider = provider_instance
+    created_provider = False
+    try:
+        if provider is None:
+            provider = create_ocr_provider(config)
+            created_provider = True
+            provider.validate()
 
-    processed_count = 0
-    for item in items_to_process:
-        item_id = _safe_int(item.get("id"))
-        current_status = str(item.get("status", "") or "").strip().lower()
-        current_text = str(item.get("text", "") or "").strip()
-
-        if not force and current_status == "done" and current_text:
-            processed_count += 1
-            _emit_progress(
-                progress_callback,
-                processed_count,
-                total_items,
-                item_id=item_id,
-                status="skipped",
-                message=f"Skipped OCR item {item_id}: already recognized.",
-            )
-            _log(logger, f"Skipping OCR item {item_id} for {relative_path.name}: already done.")
-            continue
-
-        crop_relative_path = item.get("crop_path")
-        if not crop_relative_path:
-            item["status"] = "error"
-            item["error"] = f"OCR crop is missing for item {item_id}."
-            item["updated_at"] = _timestamp()
-            item["ocr_engine"] = "paddleocr_vl_llama"
-            item["server_url"] = client.server_url
-            _save_ocr_progress(payload, ocr_path)
-            processed_count += 1
-            _emit_progress(
-                progress_callback,
-                processed_count,
-                total_items,
-                item_id=item_id,
-                status="error",
-                message=item["error"],
-            )
-            _log(logger, f"OCR item {item_id} failed: {item['error']}")
-            continue
-
-        crop_path = project.root_dir / str(crop_relative_path)
-        if not crop_path.exists():
-            item["status"] = "error"
-            item["error"] = f"OCR crop file is missing: {crop_path}"
-            item["updated_at"] = _timestamp()
-            item["ocr_engine"] = "paddleocr_vl_llama"
-            item["server_url"] = client.server_url
-            _save_ocr_progress(payload, ocr_path)
-            processed_count += 1
-            _emit_progress(
-                progress_callback,
-                processed_count,
-                total_items,
-                item_id=item_id,
-                status="error",
-                message=item["error"],
-            )
-            _log(logger, f"OCR item {item_id} failed: {item['error']}")
-            continue
-
-        item["status"] = "running"
-        item["error"] = ""
-        item["updated_at"] = _timestamp()
-        item["ocr_engine"] = "paddleocr_vl_llama"
-        item["server_url"] = client.server_url
+        provider_name = getattr(provider, "provider_label", config.provider_label)
+        _log(logger, f"Running OCR for {relative_path.name} with {provider_name}")
+        _log(logger, f"Processing {total_items} OCR item(s) for {relative_path.name}")
         _save_ocr_progress(payload, ocr_path)
-        _emit_progress(
-            progress_callback,
-            processed_count,
-            total_items,
-            item_id=item_id,
-            status="running",
-            message=f"Running OCR item {item_id}",
-        )
 
-        try:
-            recognized_text = client.recognize_image(crop_path)
-        except (PaddleOCRVLClientError, FileNotFoundError, TimeoutError) as exc:
-            item["status"] = "error"
-            item["error"] = str(exc)
-            item["updated_at"] = _timestamp()
-            _log(logger, f"OCR item {item_id} failed: {exc}")
-        except Exception as exc:
-            item["status"] = "error"
-            item["error"] = str(exc)
-            item["updated_at"] = _timestamp()
-            _log(logger, f"OCR item {item_id} failed with an unexpected error: {exc}")
-        else:
-            item["text"] = recognized_text
-            item["status"] = "done"
+        processed_count = 0
+        for item in items_to_process:
+            item_id = _safe_int(item.get("id"))
+            canon_id = str(item.get("canon_id", "") or "").strip()
+            if not canon_id:
+                raise RuntimeError(
+                    f"OCR item {item_id} on {relative_path.name} is missing canon_id. Re-prepare OCR items first."
+                )
+
+            canon_item = get_canon_item(canon_state, canon_id)
+            if not bool(canon_item.get("enabled", True)):
+                item["excluded"] = True
+                item["updated_at"] = _timestamp()
+                _save_ocr_progress(payload, ocr_path)
+                processed_count += 1
+                _emit_progress(
+                    progress_callback,
+                    processed_count,
+                    total_items,
+                    item_id=item_id,
+                    status="skipped",
+                    message=f"Skipped OCR item {item_id}: disabled in canon_state.",
+                )
+                continue
+
+            item["bbox"] = canon_item_bbox(canon_item, "bbox")
+            item["ocr_bbox"] = canon_item_bbox(canon_item, "ocr_bbox")
+            item["excluded"] = False
+            current_status = str(item.get("status", "") or "").strip().lower()
+            current_text = str(item.get("text", "") or "").strip()
+            needs_ocr = bool(item.get("needs_ocr", False))
+
+            if not force and current_status == "done" and current_text and not needs_ocr:
+                processed_count += 1
+                _emit_progress(
+                    progress_callback,
+                    processed_count,
+                    total_items,
+                    item_id=item_id,
+                    status="skipped",
+                    message=f"Skipped OCR item {item_id}: already recognized.",
+                )
+                _log(logger, f"Skipping OCR item {item_id} for {relative_path.name}: already done.")
+                continue
+
+            crop_bbox = item.get("ocr_bbox") or item.get("bbox")
+            if not isinstance(crop_bbox, (list, tuple)) or len(crop_bbox) < 4:
+                item["status"] = "error"
+                item["error"] = f"OCR crop bbox is missing for item {item_id}."
+                item["updated_at"] = _timestamp()
+                item["needs_ocr"] = True
+                _apply_provider_metadata(item, provider)
+                _save_ocr_progress(payload, ocr_path)
+                processed_count += 1
+                _emit_progress(
+                    progress_callback,
+                    processed_count,
+                    total_items,
+                    item_id=item_id,
+                    status="error",
+                    message=item["error"],
+                )
+                _log(logger, f"OCR item {item_id} failed: {item['error']}")
+                continue
+
+            crop_image = crop_image_to_bbox(source_image, crop_bbox)
+            crop_path = crop_dir / f"item_{item_id:03d}.png"
+            save_png_image(crop_image, crop_path)
+            item["crop_path"] = project_relative_path(project.root_dir, crop_path)
+
+            item["status"] = "running"
             item["error"] = ""
             item["updated_at"] = _timestamp()
-            _log(logger, f"OCR item {item_id} complete.")
+            item["needs_ocr"] = False
+            _apply_provider_metadata(item, provider)
+            _save_ocr_progress(payload, ocr_path)
+            _emit_progress(
+                progress_callback,
+                processed_count,
+                total_items,
+                item_id=item_id,
+                status="running",
+                message=f"Running OCR item {item_id}",
+            )
 
-        _save_ocr_progress(payload, ocr_path)
-        processed_count += 1
-        _emit_progress(
-            progress_callback,
-            processed_count,
-            total_items,
-            item_id=item_id,
-            status=str(item.get("status", "")),
-            message=_item_progress_message(item_id, item),
-        )
+            try:
+                recognized_text = provider.recognize_image(crop_path)
+            except TimeoutError:
+                item["status"] = "error"
+                item["error"] = _timeout_message(provider, item_id)
+                item["updated_at"] = _timestamp()
+                item["needs_ocr"] = True
+                _log(logger, f"OCR item {item_id} failed: {item['error']}")
+            except (OCRProviderError, PaddleOCRVLClientError, FileNotFoundError) as exc:
+                item["status"] = "error"
+                item["error"] = str(exc)
+                item["updated_at"] = _timestamp()
+                item["needs_ocr"] = True
+                _log(logger, f"OCR item {item_id} failed: {exc}")
+            except Exception as exc:
+                item["status"] = "error"
+                item["error"] = str(exc)
+                item["updated_at"] = _timestamp()
+                item["needs_ocr"] = True
+                _log(logger, f"OCR item {item_id} failed with an unexpected error: {exc}")
+            else:
+                item["text"] = recognized_text
+                item["status"] = "done"
+                item["error"] = ""
+                item["updated_at"] = _timestamp()
+                item["needs_ocr"] = False
+                _log(logger, f"OCR item {item_id} complete.")
+
+            _apply_provider_metadata(item, provider)
+            _save_ocr_progress(payload, ocr_path)
+            processed_count += 1
+            _emit_progress(
+                progress_callback,
+                processed_count,
+                total_items,
+                item_id=item_id,
+                status=str(item.get("status", "")),
+                message=_item_progress_message(item_id, item),
+            )
+    finally:
+        if created_provider:
+            provider.close()
 
     return ocr_path
 
@@ -243,6 +335,19 @@ def _item_progress_message(item_id: int, item: dict[str, Any]) -> str:
     if error:
         return f"OCR item {item_id}: {status} ({error})"
     return f"OCR item {item_id}: {status}"
+
+
+def _apply_provider_metadata(item: dict[str, Any], provider: OCRProvider) -> None:
+    metadata = provider.item_metadata()
+    for key, value in metadata.items():
+        item[key] = value
+
+
+def _timeout_message(provider: OCRProvider, item_id: int) -> str:
+    provider_key = str(getattr(provider, "provider_key", "") or "")
+    if provider_key == "chrome_lens":
+        return f"Chrome Lens OCR timed out for item {item_id}"
+    return f"OCR request timed out for item {item_id}"
 
 
 def _normalize_selected_item_ids(selected_item_ids: Sequence[int] | None) -> set[int] | None:

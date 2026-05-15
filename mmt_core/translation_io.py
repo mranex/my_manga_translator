@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+from .canon_state import canon_item_bbox, ensure_canon_state, resolve_canon_item_for_stage_item
+from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import ensure_path, project_relative_path
 from .ocr_io import load_ocr_json, ocr_json_path
 from .translation_models import TranslationConfig
@@ -50,8 +52,17 @@ def load_translation_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("source_language", "")
     payload.setdefault("target_language", "")
     payload.setdefault("translator", "")
+    payload.setdefault("provider", "")
     payload.setdefault("style", "")
     payload.setdefault("custom_prompt", "")
+    payload.setdefault("prompt_style_id", "")
+    payload.setdefault("prompt_mode", "")
+    payload.setdefault("user_instructions", "")
+    payload.setdefault("full_custom_prompt", "")
+    payload.setdefault("project_translation_notes", "")
+    payload.setdefault("output_contract", "")
+    payload.setdefault("prompt_preview", "")
+    payload.setdefault("prompt_hash", "")
     payload.setdefault("created_at", "")
     payload.setdefault("updated_at", "")
     payload["items"] = [normalize_translation_item(item) for item in items]
@@ -71,8 +82,17 @@ def save_translation_json(path: Path | str, data: dict[str, Any]) -> Path:
         "source_language": str(data.get("source_language", "")),
         "target_language": str(data.get("target_language", "")),
         "translator": str(data.get("translator", "")),
+        "provider": str(data.get("provider", "")),
         "style": str(data.get("style", "")),
         "custom_prompt": str(data.get("custom_prompt", "")),
+        "prompt_style_id": str(data.get("prompt_style_id", "")),
+        "prompt_mode": str(data.get("prompt_mode", "")),
+        "user_instructions": str(data.get("user_instructions", "")),
+        "full_custom_prompt": str(data.get("full_custom_prompt", "")),
+        "project_translation_notes": str(data.get("project_translation_notes", "")),
+        "output_contract": str(data.get("output_contract", "")),
+        "prompt_preview": str(data.get("prompt_preview", "")),
+        "prompt_hash": str(data.get("prompt_hash", "")),
         "created_at": str(data.get("created_at", "")),
         "updated_at": str(data.get("updated_at", "")),
         "items": [normalize_translation_item(item) for item in data.get("items", [])],
@@ -96,10 +116,22 @@ def initialize_translation_from_ocr(
         raise RuntimeError(
             f"OCR cache is missing for {relative_path.name}. Prepare and run OCR first."
         )
+    detection_path = detection_json_path(project, relative_path)
+    if not detection_path.exists():
+        raise RuntimeError(
+            f"Detection cache is missing for {relative_path.name}. Run Detection first."
+        )
 
     ocr_data = load_ocr_json(ocr_path)
+    detection_data = load_detection_json(detection_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
+    canon_state = detection_data["canon_state"]
     output_path = translation_json_path(project, relative_path)
     existing_data = load_translation_json(output_path) if output_path.exists() else None
+    existing_items_by_canon_id = _existing_items_by_canon_id(existing_data)
     existing_items_by_ocr_id = _existing_items_by_ocr_id(existing_data)
 
     created_at = (
@@ -111,13 +143,29 @@ def initialize_translation_from_ocr(
     translation_items: list[dict[str, Any]] = []
     for item_index, ocr_item in enumerate(ocr_data.get("items", [])):
         normalized_ocr_item = dict(ocr_item) if isinstance(ocr_item, dict) else {}
+        canon_item = resolve_canon_item_for_stage_item(canon_state, normalized_ocr_item, active_only=False)
+        if canon_item is None:
+            raise RuntimeError(
+                f"OCR cache for {relative_path.name} could not be matched to canon_state. "
+                "Re-prepare OCR items first."
+            )
+        normalized_ocr_item["canon_id"] = str(canon_item.get("canon_id", "") or "")
+        normalized_ocr_item["bbox"] = canon_item_bbox(canon_item, "bbox")
+        normalized_ocr_item["ocr_bbox"] = canon_item_bbox(canon_item, "ocr_bbox")
+        normalized_ocr_item["excluded"] = not bool(canon_item.get("enabled", True))
+        if bool(normalized_ocr_item.get("excluded", False)):
+            continue
         ocr_item_id = _coerce_int(normalized_ocr_item.get("id"), item_index)
         source_text = str(normalized_ocr_item.get("text", "") or "").strip()
-        existing_item = existing_items_by_ocr_id.get(ocr_item_id)
+        existing_item = (
+            existing_items_by_canon_id.get(str(normalized_ocr_item.get("canon_id", "") or ""))
+            or existing_items_by_ocr_id.get(ocr_item_id)
+        )
 
         translation_item = {
             "id": item_index,
             "ocr_item_id": ocr_item_id,
+            "canon_id": str(normalized_ocr_item.get("canon_id", "") or ""),
             "kind": str(normalized_ocr_item.get("kind", "")),
             "bbox": normalized_ocr_item.get("bbox"),
             "ocr_bbox": normalized_ocr_item.get("ocr_bbox"),
@@ -127,6 +175,7 @@ def initialize_translation_from_ocr(
             "error": "",
             "updated_at": "",
             "translator": "",
+            "excluded": False,
         }
 
         if existing_item is not None:
@@ -154,8 +203,17 @@ def initialize_translation_from_ocr(
         "source_language": config.source_language,
         "target_language": config.target_language,
         "translator": config.translator,
-        "style": config.style,
+        "provider": config.translator,
+        "style": config.resolved_style_name(),
         "custom_prompt": config.effective_prompt(),
+        "prompt_style_id": config.prompt_build_result.style_id,
+        "prompt_mode": config.prompt_build_result.prompt_mode,
+        "user_instructions": config.user_instructions,
+        "full_custom_prompt": config.full_custom_prompt,
+        "project_translation_notes": config.project_translation_notes,
+        "output_contract": config.resolved_output_contract(),
+        "prompt_preview": config.prompt_preview(),
+        "prompt_hash": config.prompt_hash(),
         "created_at": created_at,
         "updated_at": _timestamp(),
         "items": translation_items,
@@ -177,6 +235,8 @@ def summarize_translation_json(data: dict[str, Any]) -> dict[str, int]:
     for item in data.get("items", []):
         if not isinstance(item, dict):
             continue
+        if bool(item.get("excluded", False)):
+            continue
         summary["total"] += 1
         status = str(item.get("status", "pending") or "pending").strip().lower()
         if status in summary:
@@ -193,6 +253,7 @@ def normalize_translation_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     normalized = {str(key): value for key, value in item.items()}
     normalized.setdefault("id", 0)
     normalized.setdefault("ocr_item_id", 0)
+    normalized.setdefault("canon_id", "")
     normalized.setdefault("kind", "")
     normalized.setdefault("bbox", None)
     normalized.setdefault("ocr_bbox", None)
@@ -201,8 +262,101 @@ def normalize_translation_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     normalized.setdefault("status", "pending")
     normalized.setdefault("error", "")
     normalized.setdefault("updated_at", "")
+    normalized.setdefault("edited_at", "")
+    normalized.setdefault("manually_edited", False)
+    normalized.setdefault("source_manually_edited", False)
+    normalized.setdefault("source_edited_at", "")
+    normalized.setdefault("needs_retranslate", False)
     normalized.setdefault("translator", "")
+    normalized.setdefault("excluded", False)
     return normalized
+
+
+def update_translation_item_source_text(
+    path: Path | str,
+    *,
+    text: str,
+    ocr_item_id: int | None = None,
+    item_id: int | None = None,
+    manually_edited: bool = True,
+) -> dict[str, Any]:
+    """Update one translation item source text field and persist the payload."""
+
+    json_path = ensure_path(path)
+    payload = load_translation_json(json_path)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        raise ValueError("Translation cache field 'items' must be a list.")
+
+    target_item = _find_translation_item(items, ocr_item_id=ocr_item_id, item_id=item_id)
+    if target_item is None:
+        raise ValueError(f"Translation item was not found in {json_path}")
+
+    normalized_text = str(text or "")
+    timestamp = _timestamp()
+    target_item["source_text"] = normalized_text
+    target_item["updated_at"] = timestamp
+    target_item["source_edited_at"] = timestamp
+    target_item["needs_retranslate"] = True
+    target_item["error"] = ""
+    if manually_edited:
+        target_item["source_manually_edited"] = True
+
+    existing_translation = str(target_item.get("translated_text", "") or "")
+    current_status = str(target_item.get("status", "pending") or "pending").strip().lower()
+    if not normalized_text.strip() and not existing_translation.strip():
+        target_item["status"] = "skipped"
+    elif not existing_translation.strip():
+        target_item["status"] = "pending"
+    else:
+        target_item["status"] = current_status or "done"
+
+    payload["updated_at"] = timestamp
+    payload["items"] = [normalize_translation_item(item) for item in items]
+    save_translation_json(json_path, payload)
+    return load_translation_json(json_path)
+
+
+def update_translation_item_translated_text(
+    path: Path | str,
+    item_id: int,
+    text: str,
+    *,
+    manually_edited: bool = True,
+) -> dict[str, Any]:
+    """Update one translation item translated text field and persist the payload."""
+
+    json_path = ensure_path(path)
+    payload = load_translation_json(json_path)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        raise ValueError("Translation cache field 'items' must be a list.")
+
+    target_item = _find_translation_item(items, item_id=item_id)
+    if target_item is None:
+        raise ValueError(f"Translation item {item_id} was not found in {json_path}")
+
+    normalized_text = str(text or "")
+    timestamp = _timestamp()
+    target_item["translated_text"] = normalized_text
+    target_item["updated_at"] = timestamp
+    target_item["edited_at"] = timestamp
+    target_item["error"] = ""
+    target_item["needs_retranslate"] = False
+    if manually_edited:
+        target_item["manually_edited"] = True
+        target_item["translator"] = "manual_edit"
+
+    if normalized_text.strip():
+        target_item["status"] = "manually_edited" if manually_edited else "done"
+    else:
+        source_text = str(target_item.get("source_text", "") or "")
+        target_item["status"] = "pending" if source_text.strip() else "skipped"
+
+    payload["updated_at"] = timestamp
+    payload["items"] = [normalize_translation_item(item) for item in items]
+    save_translation_json(json_path, payload)
+    return load_translation_json(json_path)
 
 
 def _existing_items_by_ocr_id(existing_data: dict[str, Any] | None) -> dict[int, dict[str, Any]]:
@@ -215,6 +369,19 @@ def _existing_items_by_ocr_id(existing_data: dict[str, Any] | None) -> dict[int,
         _coerce_int(item.get("ocr_item_id"), index): normalize_translation_item(item)
         for index, item in enumerate(items)
         if isinstance(item, dict)
+    }
+
+
+def _existing_items_by_canon_id(existing_data: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(existing_data, dict):
+        return {}
+    items = existing_data.get("items", [])
+    if not isinstance(items, list):
+        return {}
+    return {
+        str(item.get("canon_id", "") or ""): normalize_translation_item(item)
+        for item in items
+        if isinstance(item, dict) and str(item.get("canon_id", "") or "").strip()
     }
 
 
@@ -250,6 +417,22 @@ def _merge_existing_translation_item(
     new_item["translator"] = str(existing_item.get("translator", "") or "")
 
 
+def _find_translation_item(
+    items: list[dict[str, Any]],
+    *,
+    ocr_item_id: int | None = None,
+    item_id: int | None = None,
+) -> dict[str, Any] | None:
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        if ocr_item_id is not None and _coerce_int(item.get("ocr_item_id"), index) == int(ocr_item_id):
+            return item
+        if item_id is not None and _coerce_int(item.get("id"), index) == int(item_id):
+            return item
+    return None
+
+
 def _coerce_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -269,4 +452,6 @@ __all__ = [
     "save_translation_json",
     "summarize_translation_json",
     "translation_json_path",
+    "update_translation_item_source_text",
+    "update_translation_item_translated_text",
 ]

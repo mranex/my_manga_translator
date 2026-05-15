@@ -8,6 +8,9 @@ import importlib
 from pathlib import Path
 from typing import Any
 
+from .canon_state import canon_item_bbox, ensure_canon_state, resolve_canon_item_for_stage_item
+from .detection_io import detection_json_path, load_detection_json, save_detection_json
+from .ocr_io import load_ocr_json, ocr_json_path
 from .translation_io import (
     initialize_translation_from_ocr,
     load_translation_json,
@@ -184,6 +187,19 @@ def run_translation_for_pages(
     if not output_paths:
         raise RuntimeError("Translation did not produce any cache files.")
     return output_paths
+
+
+def validate_translation_config(
+    config,
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> TranslationConfig:
+    """Validate translator settings and fail early on provider configuration errors."""
+
+    translation_config = TranslationConfig.from_value(config)
+    adapter = _TranslationAdapter(translation_config, logger=logger)
+    adapter._ensure_translator()
+    return translation_config
 
 
 def _run_translation_chunk_with_page_batch(
@@ -439,7 +455,10 @@ def _ensure_translation_payload(project, image_relative_path, config: Translatio
     if not json_path.exists():
         initialize_translation_from_ocr(project, relative_path, config, force=False)
     payload = load_translation_json(json_path)
+    payload, payload_changed = _refresh_translation_payload_from_canon(project, relative_path, payload)
     _touch_translation_payload(payload, config, touch_created=False)
+    if payload_changed:
+        save_translation_json(json_path, payload)
     return json_path, payload
 
 
@@ -455,6 +474,8 @@ def _collect_translation_entries(
 
     for index, item in enumerate(items):
         if not isinstance(item, dict):
+            continue
+        if bool(item.get("excluded", False)):
             continue
 
         source_text = str(item.get("source_text", "") or "").strip()
@@ -493,6 +514,63 @@ def _collect_translation_entries(
     return entries
 
 
+def _refresh_translation_payload_from_canon(
+    project,
+    image_relative_path: Path,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    detection_path = detection_json_path(project, image_relative_path)
+    if not detection_path.exists():
+        raise RuntimeError(
+            f"Detection cache is missing for {image_relative_path.name}. Run Detection first."
+        )
+
+    detection_data = load_detection_json(detection_path)
+    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    ensure_canon_state(detection_data)
+    if not had_canon_state:
+        save_detection_json(detection_path, detection_data)
+    canon_state = detection_data["canon_state"]
+
+    ocr_path = ocr_json_path(project, image_relative_path)
+    ocr_data = load_ocr_json(ocr_path) if ocr_path.exists() else {"items": []}
+    ocr_items_by_id = {
+        int(item.get("id", index)): dict(item)
+        for index, item in enumerate(ocr_data.get("items", []))
+        if isinstance(item, dict)
+    }
+
+    changed = False
+    for index, item in enumerate(payload.get("items", [])):
+        if not isinstance(item, dict):
+            continue
+        ocr_item_id = int(item.get("ocr_item_id", index) or index)
+        ocr_item = ocr_items_by_id.get(ocr_item_id, {})
+        canon_item = resolve_canon_item_for_stage_item(canon_state, item, active_only=False)
+        if canon_item is None and ocr_item:
+            canon_item = resolve_canon_item_for_stage_item(canon_state, ocr_item, active_only=False)
+        if canon_item is None:
+            continue
+
+        canon_id = str(canon_item.get("canon_id", "") or "")
+        bbox = canon_item_bbox(canon_item, "bbox")
+        ocr_bbox = canon_item_bbox(canon_item, "ocr_bbox")
+        excluded = not bool(canon_item.get("enabled", True))
+        if (
+            str(item.get("canon_id", "") or "") != canon_id
+            or item.get("bbox") != bbox
+            or item.get("ocr_bbox") != ocr_bbox
+            or bool(item.get("excluded", False)) != excluded
+        ):
+            changed = True
+        item["canon_id"] = canon_id
+        # Snapshot only. canon_state remains the source of truth.
+        item["bbox"] = bbox
+        item["ocr_bbox"] = ocr_bbox
+        item["excluded"] = excluded
+    return payload, changed
+
+
 def _mark_item_running(item: dict[str, Any], config: TranslationConfig) -> None:
     item["status"] = "running"
     item["error"] = ""
@@ -513,14 +591,24 @@ def _touch_translation_payload(
     *,
     touch_created: bool = True,
 ) -> None:
+    prompt_result = config.prompt_build_result
     if touch_created and not str(payload.get("created_at", "")).strip():
         payload["created_at"] = _timestamp()
     payload["updated_at"] = _timestamp()
     payload["source_language"] = config.source_language
     payload["target_language"] = config.target_language
     payload["translator"] = config.translator
-    payload["style"] = config.style
-    payload["custom_prompt"] = config.effective_prompt()
+    payload["provider"] = config.translator
+    payload["style"] = prompt_result.style_name
+    payload["custom_prompt"] = prompt_result.prompt_text
+    payload["prompt_style_id"] = prompt_result.style_id
+    payload["prompt_mode"] = prompt_result.prompt_mode
+    payload["user_instructions"] = config.user_instructions
+    payload["full_custom_prompt"] = config.full_custom_prompt
+    payload["project_translation_notes"] = config.project_translation_notes
+    payload["output_contract"] = prompt_result.output_contract
+    payload["prompt_preview"] = prompt_result.prompt_preview
+    payload["prompt_hash"] = prompt_result.prompt_hash
 
 
 def _normalize_selected_ids(selected_item_ids: Sequence[int] | None) -> set[int] | None:
@@ -645,6 +733,20 @@ class _TranslationAdapter:
                     style="default",
                     thinking=self.config.deepseek_thinking,
                 )
+            elif translator_key == "openai_compatible":
+                module = importlib.import_module("translator.openai_compatible_translator")
+                self._translator = module.OpenAICompatibleTranslator(
+                    provider_preset=self.config.openai_compatible_provider_preset,
+                    base_url=self.config.openai_compatible_base_url,
+                    api_key=self.config.openai_compatible_api_key or None,
+                    model=self.config.openai_compatible_model,
+                    custom_prompt=prompt,
+                    style="default",
+                    temperature=self.config.openai_compatible_temperature,
+                    max_tokens=self.config.openai_compatible_max_tokens,
+                    timeout=self.config.openai_compatible_timeout,
+                    json_mode=self.config.openai_compatible_json_mode,
+                )
             else:
                 module = importlib.import_module("translator.translator")
                 self._translator = module.MangaTranslator(
@@ -713,4 +815,5 @@ __all__ = [
     "initialize_translation_for_page",
     "run_translation_for_page",
     "run_translation_for_pages",
+    "validate_translation_config",
 ]

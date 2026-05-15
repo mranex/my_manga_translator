@@ -70,6 +70,8 @@ def build_text_mask_from_ocr(
     for item in ocr_items or []:
         if not isinstance(item, dict):
             continue
+        if bool(item.get("excluded", False)):
+            continue
 
         status = str(item.get("status", "") or "").strip().lower()
         if status == "skipped" and not include_skipped_items:
@@ -91,6 +93,69 @@ def build_text_mask_from_ocr(
     return mask, valid_boxes, int(np_module.count_nonzero(mask))
 
 
+def build_text_mask_from_canon_items(
+    image_shape: Sequence[int],
+    canon_items: Sequence[dict[str, Any]],
+    *,
+    padding: int = 8,
+    min_box_area: int = 16,
+    return_stats: bool = False,
+) -> tuple[Any, list[tuple[int, int, int, int]], int] | tuple[Any, list[tuple[int, int, int, int]], int, dict[str, int]]:
+    """Build a binary text-removal mask from active canon items."""
+
+    np_module = _require_numpy()
+    mask = np_module.zeros((int(image_shape[0]), int(image_shape[1])), dtype=np_module.uint8)
+    valid_boxes: list[tuple[int, int, int, int]] = []
+    active_item_count = 0
+    used_text_mask_bboxes = 0
+    skipped_items_without_text_mask = 0
+
+    for item in canon_items or []:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("enabled", True)):
+            continue
+        active_item_count += 1
+
+        raw_boxes = item.get("text_mask_bboxes")
+        if not isinstance(raw_boxes, list) or not raw_boxes:
+            if str(item.get("kind", "") or "").strip().lower() == "bubble":
+                skipped_items_without_text_mask += 1
+                continue
+            fallback_bbox = item.get("bbox") or item.get("ocr_bbox")
+            raw_boxes = [fallback_bbox] if fallback_bbox is not None else []
+
+        item_valid_boxes: list[tuple[int, int, int, int]] = []
+        for raw_bbox in raw_boxes:
+            resolved_bbox = expand_bbox(clamp_bbox(raw_bbox, image_shape), image_shape, padding)
+            if resolved_bbox is None:
+                continue
+            if bbox_area(resolved_bbox) < int(min_box_area):
+                continue
+            item_valid_boxes.append(resolved_bbox)
+
+        if not item_valid_boxes:
+            skipped_items_without_text_mask += 1
+            continue
+
+        for resolved_bbox in item_valid_boxes:
+            x1, y1, x2, y2 = resolved_bbox
+            mask[y1:y2, x1:x2] = 255
+            valid_boxes.append(resolved_bbox)
+        used_text_mask_bboxes += len(item_valid_boxes)
+
+    mask = _close_mask(mask, 3 if padding <= 4 else 5)
+    mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
+    masked_pixel_count = int(np_module.count_nonzero(mask))
+    if not return_stats:
+        return mask, valid_boxes, masked_pixel_count
+    return mask, valid_boxes, masked_pixel_count, {
+        "active_item_count": active_item_count,
+        "used_text_mask_bboxes": used_text_mask_bboxes,
+        "skipped_items_without_text_mask": skipped_items_without_text_mask,
+    }
+
+
 def build_bubble_guidance_mask(
     image_shape: Sequence[int],
     detection_data: dict[str, Any] | None,
@@ -106,10 +171,31 @@ def build_bubble_guidance_mask(
     mask = np_module.zeros((int(image_shape[0]), int(image_shape[1])), dtype=np_module.uint8)
     root_path = ensure_path(project_root) if project_root is not None else None
     has_any_content = False
+    allowed_bubble_ids: set[int] | None = None
+    canon_state = detection_data.get("canon_state")
+    if isinstance(canon_state, dict):
+        allowed_bubble_ids = {
+            int(detector_refs.get("bubble_id"))
+            for item in canon_state.get("items", [])
+            if isinstance(item, dict)
+            and bool(item.get("enabled", True))
+            and str(item.get("kind", "") or "") == "bubble"
+            for detector_refs in [item.get("detector_refs", {})]
+            if isinstance(detector_refs, dict)
+            and detector_refs.get("bubble_id") not in (None, "")
+        }
 
     for bubble in detection_data.get("bubbles", []):
         if not isinstance(bubble, dict):
             continue
+        bubble_id = bubble.get("id")
+        if allowed_bubble_ids is not None:
+            try:
+                normalized_bubble_id = int(bubble_id)
+            except Exception:
+                continue
+            if normalized_bubble_id not in allowed_bubble_ids:
+                continue
 
         bubble_mask_relative = str(bubble.get("mask_path", "") or "").strip()
         if bubble_mask_relative and root_path is not None:
@@ -197,6 +283,7 @@ def _close_mask(mask, kernel_size: int) -> Any:
 __all__ = [
     "bbox_area",
     "build_bubble_guidance_mask",
+    "build_text_mask_from_canon_items",
     "build_crop_windows_from_boxes",
     "build_preview_mask",
     "build_text_mask_from_ocr",

@@ -9,7 +9,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-__all__ = ["MangaTranslator", "GeminiTranslator"]
+__all__ = ["GeminiTranslator", "MangaTranslator", "OpenAICompatibleTranslator"]
 
 
 def __getattr__(name: str) -> Any:
@@ -17,4 +17,6 @@ def __getattr__(name: str) -> Any:
         return import_module(".translator", __name__).MangaTranslator
     if name == "GeminiTranslator":
         return import_module(".gemini_translator", __name__).GeminiTranslator
+    if name == "OpenAICompatibleTranslator":
+        return import_module(".openai_compatible_translator", __name__).OpenAICompatibleTranslator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

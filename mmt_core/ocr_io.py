@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
@@ -61,14 +62,23 @@ def save_ocr_payload(payload: dict[str, Any], output_path: Path | str) -> Path:
     json_path = ensure_path(output_path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     normalized_payload = {
+        str(key): _json_safe(value)
+        for key, value in dict(payload).items()
+    }
+    normalized_payload.update(
+        {
         "schema_version": int(payload.get("schema_version", OCR_SCHEMA_VERSION)),
         "stage": "ocr",
         "source_image": str(payload.get("source_image", "")),
         "detection_cache_path": str(payload.get("detection_cache_path", "")),
         "image_width": int(payload.get("image_width", 0) or 0),
         "image_height": int(payload.get("image_height", 0) or 0),
+        "edited": bool(payload.get("edited", False)),
+        "edited_at": str(payload.get("edited_at", "") or ""),
+        "downstream_stale": list(payload.get("downstream_stale", []) or []),
         "items": [normalize_ocr_item(item) for item in payload.get("items", [])],
-    }
+        }
+    )
     json_path.write_text(json.dumps(_json_safe(normalized_payload), indent=2), encoding="utf-8")
     return json_path
 
@@ -97,6 +107,13 @@ def load_ocr_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("detection_cache_path", "")
     payload.setdefault("image_width", 0)
     payload.setdefault("image_height", 0)
+    payload.setdefault("edited", False)
+    payload.setdefault("edited_at", "")
+    payload["downstream_stale"] = (
+        list(payload.get("downstream_stale", []) or [])
+        if isinstance(payload.get("downstream_stale", []), list)
+        else []
+    )
     payload["items"] = [normalize_ocr_item(item) for item in items]
     return payload
 
@@ -112,6 +129,7 @@ def normalize_ocr_item(item: dict[str, Any]) -> dict[str, Any]:
         for key, value in dict(item).items()
     }
     normalized.setdefault("id", 0)
+    normalized.setdefault("canon_id", "")
     normalized.setdefault("kind", "")
     normalized.setdefault("bbox", None)
     normalized.setdefault("ocr_bbox", None)
@@ -124,7 +142,14 @@ def normalize_ocr_item(item: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("status", "prepared")
     normalized.setdefault("error", "")
     normalized.setdefault("updated_at", "")
+    normalized.setdefault("edited_at", "")
+    normalized.setdefault("manually_edited", False)
+    normalized.setdefault("excluded", False)
+    normalized.setdefault("bbox_edited", False)
+    normalized.setdefault("bbox_edited_at", "")
+    normalized.setdefault("needs_ocr", False)
     normalized.setdefault("ocr_engine", "")
+    normalized.setdefault("ocr_provider", "")
     normalized.setdefault("server_url", "")
     return normalized
 
@@ -139,13 +164,67 @@ def summarize_ocr_items(items: Sequence[dict[str, Any]]) -> dict[str, int]:
         "done": 0,
         "error": 0,
         "skipped": 0,
+        "excluded": 0,
     }
     for item in items:
+        if bool(item.get("excluded", False)):
+            summary["excluded"] += 1
+            continue
         summary["total"] += 1
         status = str(item.get("status", "prepared") or "prepared").strip().lower()
         if status in summary:
             summary[status] += 1
     return summary
+
+
+def update_ocr_item_text(
+    path: Path | str,
+    item_id: int,
+    text: str,
+    *,
+    manually_edited: bool = True,
+) -> dict[str, Any]:
+    """Update one OCR item text field and persist the payload."""
+
+    json_path = ensure_path(path)
+    payload = load_ocr_json(json_path)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        raise ValueError("OCR cache field 'items' must be a list.")
+
+    normalized_text = str(text or "")
+    timestamp = _timestamp()
+    target_item: dict[str, Any] | None = None
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        current_item_id = _coerce_int(item.get("id"), index)
+        if current_item_id != int(item_id):
+            continue
+        target_item = item
+        break
+
+    if target_item is None:
+        raise ValueError(f"OCR item {item_id} was not found in {json_path}")
+
+    previous_status = str(target_item.get("status", "prepared") or "prepared").strip().lower()
+    target_item["text"] = normalized_text
+    target_item["updated_at"] = timestamp
+    target_item["edited_at"] = timestamp
+    target_item["error"] = ""
+    if manually_edited:
+        target_item["manually_edited"] = True
+    target_item["needs_ocr"] = False
+
+    if normalized_text.strip():
+        if previous_status != "done":
+            target_item["status"] = "done"
+    else:
+        target_item["status"] = "skipped"
+
+    payload["items"] = [normalize_ocr_item(item) for item in items]
+    save_ocr_payload(payload, json_path)
+    return load_ocr_json(json_path)
 
 
 def _json_safe(value: Any) -> Any:
@@ -173,6 +252,17 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
 __all__ = [
     "OCR_SCHEMA_VERSION",
     "load_ocr_json",
@@ -182,4 +272,5 @@ __all__ = [
     "save_ocr_payload",
     "save_ocr_items_result",
     "summarize_ocr_items",
+    "update_ocr_item_text",
 ]
