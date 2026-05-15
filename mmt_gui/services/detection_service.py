@@ -25,15 +25,20 @@ class DetectionService(BaseService):
 
     def on_initialize(self) -> None:
         if not bool(self.startup_options.get("preload_detection", True)):
-            self._emit_status("error", "Detection preload is disabled. Enable startup preload or reload the service.")
-            return
+            raise RuntimeError("Detection preload is disabled. Enable startup preload or reload the service.")
         if str(os.environ.get("QT_QPA_PLATFORM", "") or "").strip().lower() in {"offscreen", "minimal"}:
-            self._emit_status("error", "Detection preload is not available in headless Qt mode.")
-            return
+            raise RuntimeError("Detection preload is not available in headless Qt mode.")
         self._engine.preload(
             logger=lambda message: self._emit_log("info", message),
             status_callback=lambda message: self._emit_status("loading", message),
         )
+        if not self._engine.is_ready():
+            missing = ", ".join(self._engine.missing_detectors()) or "unknown detectors"
+            raise RuntimeError(
+                "Detection resident models failed to load. "
+                f"Missing resident detectors: {missing}. "
+                "Active detection requires PPLayout, YOLO bubble, and comic/text detectors."
+            )
         self._emit_log("info", "Detection models are ready.")
 
     def on_restart(self) -> None:
@@ -86,18 +91,11 @@ class DetectionService(BaseService):
         page_results: list[DetectionPageResult] = []
         bridge.message.emit(f"Starting detection for {total_pages} page(s).")
         bridge.progress.emit(0)
-        self._diag_for_task(task, step="command_start", message=f"detect_all command received ({total_pages} page(s))")
+        self._diag_for_task(task, step="command_start", message=f"detection command received ({total_pages} page(s))")
 
         for index, image_path in enumerate(task.image_paths, start=1):
             self._check_canceled(command, message="Detection canceled before the next page.")
             page_path = Path(image_path)
-            self._diag_for_task(
-                task,
-                page_path=page_path,
-                step="page_loop_start",
-                message=f"page loop start {index}/{total_pages}",
-                extra={"page_index": index, "page_total": total_pages},
-            )
             bridge.event.emit(
                 {
                     "stage": "detection",
@@ -190,13 +188,6 @@ class DetectionService(BaseService):
 
         if not task.force and detection_json_path.exists():
             bridge.message.emit(f"Reusing cached detection for {source_image_path.name}")
-            write_runtime_diagnostic(
-                "reusing cached detection json",
-                log_path=diagnostics_path,
-                service="detection",
-                page=source_image_path.name,
-                step="reuse_cache",
-            )
             return detection_json_path
 
         bridge.message.emit(f"Loading image for detection: {source_image_path.name}")
@@ -217,11 +208,25 @@ class DetectionService(BaseService):
         )
 
         bridge.message.emit(f"Running detection: {source_image_path.name}")
+        write_runtime_diagnostic(
+            "before detect_image",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="before_detect_image",
+        )
         result = self._engine.detect_image(
             image,
             logger=bridge.message.emit,
             diagnostics_path=diagnostics_path,
             page_name=source_image_path.name,
+        )
+        write_runtime_diagnostic(
+            "after detect_image",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="after_detect_image",
         )
 
         write_runtime_diagnostic(
