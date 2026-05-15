@@ -761,7 +761,7 @@ def _prepare_mask_bundle(
     text_mask, valid_boxes, masked_pixel_count, mask_stats = build_text_mask_from_canon_ocr_bboxes(
         source_image.shape,
         get_active_canon_items(detection_data["canon_state"]),
-        padding=mask_padding,
+        padding=0,
         strict_mask=True,
         return_stats=True,
     )
@@ -894,6 +894,18 @@ def _prepare_mask_bundle(
     )
     save_inpaint_json(metadata_path, metadata)
     _log(logger, f"Prepared inpaint mask for {Path(image_relative).name}: {text_mask_file}")
+    for box_log in list(mask_stats.get("box_logs", []) or []):
+        _log(
+            logger,
+            "Inpaint mask box: "
+            f"item_id={box_log.get('item_id')} "
+            f"raw_ocr_bbox={box_log.get('raw_ocr_bbox')} "
+            f"clamped_ocr_bbox={box_log.get('clamped_ocr_bbox')} "
+            f"fallback_used={bool(box_log.get('fallback_used', False))} "
+            f"requested_mask_padding={int(box_log.get('requested_mask_padding', 0) or 0)} "
+            f"effective_mask_padding={int(box_log.get('effective_mask_padding', 0) or 0)} "
+            f"final_mask_bbox={box_log.get('final_mask_bbox')}"
+        )
     _log(
         logger,
         "Inpaint mask stats: "
@@ -942,8 +954,11 @@ def _settings_payload(
     use_bubble_mask: bool,
     use_crop_windows: bool,
 ) -> dict[str, Any]:
+    requested_mask_padding = int(mask_padding)
     return {
-        "mask_padding": int(mask_padding),
+        "mask_padding": requested_mask_padding,
+        "text_removal_mask_padding": 0,
+        "mask_padding_ignored_for_strict_ocr_bbox": bool(requested_mask_padding > 0),
         "use_bubble_mask": bool(use_bubble_mask),
         "use_crop_windows": bool(use_crop_windows),
         "crop_trigger_size": DEFAULT_CROP_TRIGGER_SIZE,

@@ -151,6 +151,9 @@ class InpaintPanel(StagePanel):
         self.mask_padding_input = QSpinBox()
         self.mask_padding_input.setRange(0, 128)
         self.mask_padding_input.setValue(0)
+        self.mask_padding_input.setToolTip(
+            "Strict OCR bbox mask is active. Text-removal mask uses the exact purple OCR box. Padding is ignored."
+        )
         self.use_bubble_mask_checkbox = QCheckBox("Use bubble mask guidance")
         self.use_bubble_mask_checkbox.setChecked(True)
         self.use_crop_windows_checkbox = QCheckBox("Use crop windows")
@@ -160,7 +163,7 @@ class InpaintPanel(StagePanel):
         self.device_input.addItems(["auto", "cpu", "cuda", "cuda:0"])
         self.device_input.setCurrentText("auto")
 
-        settings_form.addRow("Mask Padding:", self.mask_padding_input)
+        settings_form.addRow("Legacy Mask Padding (ignored in strict OCR mode):", self.mask_padding_input)
         settings_form.addRow("Use Bubble Mask:", self.use_bubble_mask_checkbox)
         settings_form.addRow("Use Crop Windows:", self.use_crop_windows_checkbox)
         settings_form.addRow("Device:", self.device_input)

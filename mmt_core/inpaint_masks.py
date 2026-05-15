@@ -67,6 +67,7 @@ def build_text_mask_from_ocr(
     np_module = _require_numpy()
     mask = np_module.zeros((int(image_shape[0]), int(image_shape[1])), dtype=np_module.uint8)
     valid_boxes: list[tuple[int, int, int, int]] = []
+    effective_padding = 0 if strict_mask else int(padding)
 
     for item in ocr_items or []:
         if not isinstance(item, dict):
@@ -80,8 +81,8 @@ def build_text_mask_from_ocr(
 
         bbox = item.get("ocr_bbox") or item.get("bbox")
         resolved_bbox = clamp_bbox(bbox, image_shape)
-        if resolved_bbox is not None and int(padding) > 0:
-            resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
+        if resolved_bbox is not None and effective_padding > 0:
+            resolved_bbox = expand_bbox(resolved_bbox, image_shape, effective_padding)
         if resolved_bbox is None:
             continue
         if bbox_area(resolved_bbox) < int(min_box_area):
@@ -91,8 +92,8 @@ def build_text_mask_from_ocr(
         mask[y1:y2, x1:x2] = 255
         valid_boxes.append(resolved_bbox)
 
-    if not strict_mask or int(padding) > 0:
-        mask = _close_mask(mask, 3 if padding <= 4 else 5)
+    if not strict_mask and effective_padding > 0:
+        mask = _close_mask(mask, 3 if effective_padding <= 4 else 5)
     mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
     return mask, valid_boxes, int(np_module.count_nonzero(mask))
 
@@ -139,10 +140,12 @@ def build_text_mask_from_canon_ocr_bboxes(
     np_module = _require_numpy()
     mask = np_module.zeros((int(image_shape[0]), int(image_shape[1])), dtype=np_module.uint8)
     valid_boxes: list[tuple[int, int, int, int]] = []
+    effective_padding = 0 if strict_mask else int(padding)
     active_item_count = 0
     used_ocr_bboxes = 0
     fallback_to_bbox_count = 0
     skipped_invalid_bbox_count = 0
+    box_logs: list[dict[str, Any]] = []
 
     for item in canon_items or []:
         if not isinstance(item, dict):
@@ -152,17 +155,33 @@ def build_text_mask_from_canon_ocr_bboxes(
         active_item_count += 1
 
         used_fallback = False
-        raw_bbox = item.get("ocr_bbox")
-        resolved_bbox = clamp_bbox(raw_bbox, image_shape)
+        raw_ocr_bbox = item.get("ocr_bbox")
+        clamped_ocr_bbox = clamp_bbox(raw_ocr_bbox, image_shape)
+        resolved_bbox = clamped_ocr_bbox
+        raw_bbox = raw_ocr_bbox
         if resolved_bbox is None:
             raw_bbox = item.get("bbox")
             resolved_bbox = clamp_bbox(raw_bbox, image_shape)
             used_fallback = resolved_bbox is not None
+        clamped_bbox = resolved_bbox
 
-        if resolved_bbox is not None and int(padding) > 0:
-            resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
+        if resolved_bbox is not None and effective_padding > 0:
+            resolved_bbox = expand_bbox(resolved_bbox, image_shape, effective_padding)
         if resolved_bbox is None or bbox_area(resolved_bbox) < int(min_box_area):
             skipped_invalid_bbox_count += 1
+            box_logs.append(
+                {
+                    "item_id": item.get("id"),
+                    "raw_ocr_bbox": raw_ocr_bbox,
+                    "raw_bbox": raw_bbox,
+                    "clamped_ocr_bbox": clamped_ocr_bbox,
+                    "clamped_bbox": clamped_bbox,
+                    "fallback_used": used_fallback,
+                    "requested_mask_padding": int(padding),
+                    "effective_mask_padding": effective_padding,
+                    "final_mask_bbox": None,
+                }
+            )
             continue
 
         x1, y1, x2, y2 = resolved_bbox
@@ -171,9 +190,22 @@ def build_text_mask_from_canon_ocr_bboxes(
         used_ocr_bboxes += 1
         if used_fallback:
             fallback_to_bbox_count += 1
+        box_logs.append(
+            {
+                "item_id": item.get("id"),
+                "raw_ocr_bbox": raw_ocr_bbox,
+                "raw_bbox": raw_bbox,
+                "clamped_ocr_bbox": clamped_ocr_bbox,
+                "clamped_bbox": clamped_bbox,
+                "fallback_used": used_fallback,
+                "requested_mask_padding": int(padding),
+                "effective_mask_padding": effective_padding,
+                "final_mask_bbox": resolved_bbox,
+            }
+        )
 
-    if not strict_mask or int(padding) > 0:
-        mask = _close_mask(mask, 3 if padding <= 4 else 5)
+    if not strict_mask and effective_padding > 0:
+        mask = _close_mask(mask, 3 if effective_padding <= 4 else 5)
     mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
     masked_pixel_count = int(np_module.count_nonzero(mask))
     if not return_stats:
@@ -185,6 +217,7 @@ def build_text_mask_from_canon_ocr_bboxes(
         "skipped_invalid_bbox_count": skipped_invalid_bbox_count,
         "used_text_mask_bboxes": used_ocr_bboxes,
         "skipped_items_without_text_mask": skipped_invalid_bbox_count,
+        "box_logs": box_logs,
     }
 
 
