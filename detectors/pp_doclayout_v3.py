@@ -464,21 +464,62 @@ class PPDocLayoutV3Detector:
         self.device = device
 
     def _prepare_pil_image(self, image):
-        _require_numpy()
+        np_module = _require_numpy()
         pil_module = importlib.import_module("PIL.Image")
-        if image.ndim == 2:
-            return pil_module.fromarray(image)
-        return pil_module.fromarray(image[..., ::-1])
+        array = np_module.asarray(image)
+
+        if array.size == 0:
+            raise ValueError("PPLayout received an empty image array.")
+
+        if array.dtype != np_module.uint8:
+            array = np_module.clip(array, 0, 255).astype(np_module.uint8)
+
+        if array.ndim == 2:
+            gray = np_module.ascontiguousarray(array)
+            pil_image = pil_module.fromarray(gray, mode="L")
+            pil_image.load()
+            return pil_image
+
+        if array.ndim != 3:
+            raise ValueError(f"Unsupported PPLayout image shape: {array.shape}")
+
+        channels = int(array.shape[2])
+        if channels == 3:
+            rgb = array[:, :, [2, 1, 0]]
+            rgb = np_module.ascontiguousarray(rgb)
+            pil_image = pil_module.fromarray(rgb, mode="RGB")
+            pil_image.load()
+            return pil_image
+
+        if channels == 4:
+            rgba = array[:, :, [2, 1, 0, 3]]
+            rgba = np_module.ascontiguousarray(rgba)
+            pil_image = pil_module.fromarray(rgba, mode="RGBA")
+            pil_image.load()
+            return pil_image
+
+        raise ValueError(f"Unsupported PPLayout image channel count: {array.shape}")
 
     def detect_layout_regions(self, image) -> list[LayoutRegion]:
-        _require_numpy()
+        np_module = _require_numpy()
         if self._model is None or self._image_processor is None:
             self.load()
 
         torch = importlib.import_module("torch")
         pil_image = self._prepare_pil_image(image)
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+            pil_image.load()
+
+        _write_pp_layout_breadcrumb(
+            "before PPLayout image_processor call",
+            image_shape=tuple(int(value) for value in np_module.asarray(image).shape),
+            image_dtype=str(np_module.asarray(image).dtype),
+            pil_mode=pil_image.mode,
+        )
 
         inputs = self._image_processor(images=pil_image, return_tensors="pt")
+        _write_pp_layout_breadcrumb("after PPLayout image_processor call", pil_mode=pil_image.mode)
         prepared_inputs = {
             key: value.to(self.device) if hasattr(value, "to") else value
             for key, value in inputs.items()
@@ -558,6 +599,15 @@ def detect_layout_regions(
 ) -> list[LayoutRegion]:
     active_detector = detector if detector is not None else get_pp_doclayout_v3_detector()
     return active_detector.detect_layout_regions(image)
+
+
+def _write_pp_layout_breadcrumb(message: str, **details: Any) -> None:
+    try:
+        from mmt_core.crash_logging import write_crash_breadcrumb
+
+        write_crash_breadcrumb(message, detector="pp_doclayout_v3", **details)
+    except Exception:
+        pass
 
 
 __all__ = [
