@@ -655,7 +655,13 @@ class MainWindow(QMainWindow):
             )
             self.ocr_panel.apply_settings(self.app_settings.panel_settings("ocr"))
             self.translation_panel.apply_settings(self.app_settings.panel_settings("translation"))
-            self.inpaint_panel.apply_settings(self.app_settings.panel_settings("inpaint"))
+            inpaint_settings = self.app_settings.panel_settings("inpaint")
+            self.inpaint_panel.apply_settings(inpaint_settings)
+            migration_message = self.inpaint_panel.consume_settings_migration_message()
+            if migration_message:
+                migrated_settings = self.inpaint_panel.settings_snapshot()
+                self.app_settings.set_panel_settings("inpaint", migrated_settings)
+                self.log(migration_message)
             self.render_panel.apply_settings(self.app_settings.panel_settings("render"))
             self.export_panel.apply_settings(self.app_settings.panel_settings("export"))
         except Exception as exc:
@@ -4318,7 +4324,7 @@ class MainWindow(QMainWindow):
                 return
 
             normalized_stage = str(stage_name or "").strip().lower()
-            image_relative_path, event_name = self._update_processing_page_from_event(payload)
+            image_relative_path, event_name = self._update_processing_page_from_event(payload, stage_name=normalized_stage)
             if is_batch and self.preview_controller.should_follow_batch():
                 self._active_batch_follow_stage = normalized_stage
 
@@ -4333,19 +4339,26 @@ class MainWindow(QMainWindow):
             self.log(f"Worker event handling failed for {stage_name}: {exc}", level="error")
             self.log(traceback.format_exc(), level="error")
 
-    def _update_processing_page_from_event(self, payload: dict[str, Any]) -> tuple[str | None, str]:
+    def _update_processing_page_from_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        stage_name: str = "",
+    ) -> tuple[str | None, str]:
         image_relative_path = self._image_relative_path_from_event(payload)
         if not image_relative_path or self.current_project is None:
             return image_relative_path, str(payload.get("event", "") or "").strip().lower()
 
         event_name = str(payload.get("event", "") or "").strip().lower()
+        normalized_stage = str(stage_name or "").strip().lower()
         refresh_paths: set[str] = set()
         previous_processing_page = self._processing_page_relative_path
         if event_name in {"page_start", "batch_page_start"}:
             self._processing_page_relative_path = image_relative_path
-            if previous_processing_page:
-                refresh_paths.add(previous_processing_page)
-            refresh_paths.add(image_relative_path)
+            if normalized_stage != "detection":
+                if previous_processing_page:
+                    refresh_paths.add(previous_processing_page)
+                refresh_paths.add(image_relative_path)
         elif event_name == "mask_ready":
             refresh_paths.add(image_relative_path)
         elif event_name in {"page_done", "page_error"}:
@@ -4363,6 +4376,8 @@ class MainWindow(QMainWindow):
             return
 
         if event_name in {"page_start", "batch_page_start"}:
+            if stage_name == "detection":
+                return
             self._select_page_for_event(image_relative_path)
             return
 

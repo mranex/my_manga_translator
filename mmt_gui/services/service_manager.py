@@ -212,6 +212,7 @@ class ServiceManager(QObject):
             "preload_inpaint": bool(self.startup_options.get("preload_inpaint", True)),
             "preload_render": bool(self.startup_options.get("preload_render", True)),
             "device": str(self.startup_options.get("inpaint_device", "") or ""),
+            "workspace_root": str(self.workspace_root),
         }
 
         self._register_service(

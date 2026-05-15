@@ -258,10 +258,9 @@ def build_bubble_guidance_mask(
 
 def build_preview_mask(text_mask: Any, bubble_mask: Any | None = None) -> Any:
     np_module = _require_numpy()
-    preview = np_module.where(text_mask > 0, 255, 0).astype(np_module.uint8)
-    if bubble_mask is not None:
-        preview = np_module.maximum(preview, np_module.where(bubble_mask > 0, 96, 0).astype(np_module.uint8))
-    return preview
+    # Keep the preview focused on the exact OCR-target removal mask so bubble
+    # guidance cannot be mistaken for the actual inpaint target area.
+    return np_module.where(text_mask > 0, 255, 0).astype(np_module.uint8)
 
 
 def build_crop_windows_from_boxes(

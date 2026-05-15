@@ -17,6 +17,9 @@ from .base_panel import StagePanel
 class InpaintPanel(StagePanel):
     """Inspector panel for LaMa model actions and inpaint metadata."""
 
+    SETTINGS_VERSION = 2
+    SETTINGS_VERSION_KEY = "inpaint_settings_version"
+
     prepare_selected_requested = pyqtSignal()
     reprepare_selected_requested = pyqtSignal()
     prepare_all_requested = pyqtSignal()
@@ -32,6 +35,7 @@ class InpaintPanel(StagePanel):
 
     def __init__(self, parent: object | None = None) -> None:
         super().__init__("Inpaint", parent)
+        self._pending_settings_migration_message: str | None = None
 
         model_card = CollapsibleSection("LaMa Model", expanded=False)
         self.load_model_button = QPushButton("Load LaMa Model")
@@ -209,6 +213,7 @@ class InpaintPanel(StagePanel):
             "use_crop_windows": self.use_crop_windows_checkbox.isChecked(),
             "force": bool(force_override) if force_override is not None else False,
             "device": self.device_value(),
+            "strict_ocr_bbox_mask": True,
         }
 
     def device_value(self) -> str | None:
@@ -267,17 +272,31 @@ class InpaintPanel(StagePanel):
 
     def settings_snapshot(self) -> dict[str, Any]:
         return {
+            self.SETTINGS_VERSION_KEY: self.SETTINGS_VERSION,
+            "settings_version": self.SETTINGS_VERSION,
             "mask_padding": self.mask_padding_input.value(),
             "use_bubble_mask": self.use_bubble_mask_checkbox.isChecked(),
             "use_crop_windows": self.use_crop_windows_checkbox.isChecked(),
             "device": self.device_input.currentText().strip() or "auto",
+            "strict_ocr_bbox_mask": True,
         }
 
     def apply_settings(self, settings: dict[str, Any]) -> None:
         if not isinstance(settings, dict):
             return
+        version = 0
         try:
-            self.mask_padding_input.setValue(int(settings.get("mask_padding", self.mask_padding_input.value())))
+            version = int(
+                settings.get(self.SETTINGS_VERSION_KEY, settings.get("settings_version", 0)) or 0
+            )
+        except Exception:
+            version = 0
+        target_mask_padding = settings.get("mask_padding", self.mask_padding_input.value())
+        if settings and version < self.SETTINGS_VERSION:
+            target_mask_padding = 0
+            self._pending_settings_migration_message = "Migrated Inpaint mask padding default to 0."
+        try:
+            self.mask_padding_input.setValue(int(target_mask_padding))
         except Exception:
             pass
         self.use_bubble_mask_checkbox.setChecked(
@@ -287,6 +306,11 @@ class InpaintPanel(StagePanel):
             bool(settings.get("use_crop_windows", self.use_crop_windows_checkbox.isChecked()))
         )
         self.device_input.setCurrentText(str(settings.get("device", "") or self.device_input.currentText()))
+
+    def consume_settings_migration_message(self) -> str | None:
+        message = self._pending_settings_migration_message
+        self._pending_settings_migration_message = None
+        return message
 
 
 __all__ = ["InpaintPanel"]

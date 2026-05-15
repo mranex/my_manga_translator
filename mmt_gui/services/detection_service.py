@@ -10,6 +10,7 @@ from typing import Any
 from mmt_core.detection_engine import DetectionEngine
 from mmt_core.detection_io import save_detection_result
 from mmt_core.image_io import ensure_path, load_image_bgr
+from mmt_core.runtime_diagnostics import resolve_runtime_diagnostics_path, write_runtime_diagnostic
 from mmt_gui.workers import DetectionPageResult, DetectionTask, DetectionWorkerResult
 
 from .base_service import BaseService, WorkerSignalsBridge
@@ -20,6 +21,7 @@ class DetectionService(BaseService):
     def __init__(self, *, scheduler: Any | None = None, startup_options: dict | None = None) -> None:
         super().__init__("detection", scheduler=scheduler, startup_options=startup_options)
         self._engine = DetectionEngine()
+        self._workspace_root = Path(str((startup_options or {}).get("workspace_root", "") or "")).resolve() if str((startup_options or {}).get("workspace_root", "") or "").strip() else Path.cwd()
 
     def on_initialize(self) -> None:
         if not bool(self.startup_options.get("preload_detection", True)):
@@ -84,10 +86,18 @@ class DetectionService(BaseService):
         page_results: list[DetectionPageResult] = []
         bridge.message.emit(f"Starting detection for {total_pages} page(s).")
         bridge.progress.emit(0)
+        self._diag_for_task(task, step="command_start", message=f"detect_all command received ({total_pages} page(s))")
 
         for index, image_path in enumerate(task.image_paths, start=1):
             self._check_canceled(command, message="Detection canceled before the next page.")
             page_path = Path(image_path)
+            self._diag_for_task(
+                task,
+                page_path=page_path,
+                step="page_loop_start",
+                message=f"page loop start {index}/{total_pages}",
+                extra={"page_index": index, "page_total": total_pages},
+            )
             bridge.event.emit(
                 {
                     "stage": "detection",
@@ -173,19 +183,54 @@ class DetectionService(BaseService):
         detection_json_path = detection_dir / f"{source_image_path.stem}.json"
         page_mask_dir = masks_dir / source_image_path.stem
         project_root = detection_dir.parents[1]
+        diagnostics_path = resolve_runtime_diagnostics_path(
+            project_root=project_root,
+            workspace_root=self._workspace_root,
+        )
 
         if not task.force and detection_json_path.exists():
             bridge.message.emit(f"Reusing cached detection for {source_image_path.name}")
+            write_runtime_diagnostic(
+                "reusing cached detection json",
+                log_path=diagnostics_path,
+                service="detection",
+                page=source_image_path.name,
+                step="reuse_cache",
+            )
             return detection_json_path
 
         bridge.message.emit(f"Loading image for detection: {source_image_path.name}")
+        write_runtime_diagnostic(
+            "before load image",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="before_load_image",
+        )
         image = load_image_bgr(source_image_path)
+        write_runtime_diagnostic(
+            "after load image",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="after_load_image",
+        )
 
         bridge.message.emit(f"Running detection: {source_image_path.name}")
-        self._emit_log("info", f"before detection inference {source_image_path.name}")
-        result = self._engine.detect_image(image, logger=bridge.message.emit)
-        self._emit_log("info", f"after detection inference {source_image_path.name}")
+        result = self._engine.detect_image(
+            image,
+            logger=bridge.message.emit,
+            diagnostics_path=diagnostics_path,
+            page_name=source_image_path.name,
+        )
 
+        write_runtime_diagnostic(
+            "before save_detection_result",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="before_save_detection_result",
+        )
         output_path = save_detection_result(
             result,
             image_path=source_image_path,
@@ -195,8 +240,41 @@ class DetectionService(BaseService):
             project_root=project_root,
             logger=bridge.message.emit,
         )
+        write_runtime_diagnostic(
+            "after save_detection_result",
+            log_path=diagnostics_path,
+            service="detection",
+            page=source_image_path.name,
+            step="after_save_detection_result",
+        )
         bridge.message.emit(f"Saved detection cache: {output_path}")
         return output_path
+
+    def _diag_for_task(
+        self,
+        task: DetectionTask,
+        *,
+        step: str,
+        message: str,
+        page_path: Path | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            project_root = None
+            detection_cache_dir = ensure_path(task.detection_cache_dir)
+            if len(detection_cache_dir.parents) >= 2:
+                project_root = detection_cache_dir.parents[1]
+        except Exception:
+            project_root = None
+        write_runtime_diagnostic(
+            message,
+            project_root=project_root,
+            workspace_root=self._workspace_root,
+            service="detection",
+            page=page_path.name if page_path is not None else "",
+            step=step,
+            extra=extra,
+        )
 
 
 __all__ = ["DetectionService"]
