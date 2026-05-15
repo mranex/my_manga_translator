@@ -778,7 +778,7 @@ def _normalize_inpaint_settings(
 ) -> dict[str, Any]:
     payload = dict(inpaint_settings or {})
     return {
-        "mask_padding": int(payload.get("mask_padding", 8) or 8),
+        "mask_padding": int(payload.get("mask_padding", 0) or 0),
         "use_bubble_mask": bool(payload.get("use_bubble_mask", True)),
         "use_crop_windows": bool(payload.get("use_crop_windows", True)),
         "device": payload.get("device"),

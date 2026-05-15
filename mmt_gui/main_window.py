@@ -11,7 +11,7 @@ import sys
 import traceback
 from typing import Any
 
-from PyQt6.QtCore import QByteArray, Qt, QThreadPool
+from PyQt6.QtCore import QByteArray, Qt, QThreadPool, QTimer
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -251,13 +251,21 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status_bar)
         self.statusBar().hide()
 
+        inpaint_panel_settings = self.app_settings.panel_settings("inpaint")
+        startup_inpaint_device = str(
+            inpaint_panel_settings.get(
+                "device",
+                self.app_settings.string_value("services/inpaint_startup_device", ""),
+            )
+            or ""
+        )
         self.service_manager = ServiceManager(
             workspace_root=self.workspace_root,
             startup_options={
                 "preload_detection": self.app_settings.bool_value("services/preload_detection_on_startup", True),
                 "preload_inpaint": self.app_settings.bool_value("services/preload_inpaint_on_startup", True),
                 "preload_render": self.app_settings.bool_value("services/preload_render_on_startup", True),
-                "inpaint_device": self.app_settings.string_value("services/inpaint_startup_device", ""),
+                "inpaint_device": startup_inpaint_device,
             },
             parent=self,
         )
@@ -4360,7 +4368,37 @@ class MainWindow(QMainWindow):
 
         if event_name in {"page_done", "mask_ready"}:
             self._select_page_for_event(image_relative_path)
-            self._apply_preview_after_stage(stage_name, image_relative_path=image_relative_path)
+            if stage_name in {"inpaint", "inpaint_mask"}:
+                self._schedule_inpaint_preview_refresh(stage_name, image_relative_path=image_relative_path)
+            else:
+                self._apply_preview_after_stage(stage_name, image_relative_path=image_relative_path)
+
+    def _schedule_inpaint_preview_refresh(self, stage_name: str, *, image_relative_path: str) -> None:
+        self.log(
+            f"Inpaint preview refresh queued for {Path(image_relative_path).name} ({stage_name}).",
+            level="info",
+        )
+
+        def _refresh() -> None:
+            try:
+                if self.current_project is None:
+                    return
+                if image_relative_path not in self._all_page_relative_paths():
+                    return
+                self.log(
+                    f"Before preview refresh from {stage_name} event for {Path(image_relative_path).name}.",
+                    level="info",
+                )
+                self._apply_preview_after_stage(stage_name, image_relative_path=image_relative_path)
+                self.log(
+                    f"After preview refresh from {stage_name} event for {Path(image_relative_path).name}.",
+                    level="info",
+                )
+            except Exception as exc:
+                self.log(f"Inpaint preview refresh failed: {exc}", level="error")
+                self.log(traceback.format_exc(), level="error")
+
+        QTimer.singleShot(50, _refresh)
 
     def _select_page_for_event(self, image_relative_path: str) -> None:
         if self.current_project is None:

@@ -351,7 +351,7 @@ class ProcessService(BaseService):
                 project=project,
                 image_relative_paths=[image_relative_path],
                 force=bool(settings.get("force", process_task.force)),
-                mask_padding=int(settings.get("mask_padding", 8) or 8),
+                mask_padding=int(settings.get("mask_padding", 0) or 0),
                 use_bubble_mask=bool(settings.get("use_bubble_mask", True)),
             )
         if step_key == "inpaint":
@@ -362,7 +362,7 @@ class ProcessService(BaseService):
                 project=project,
                 image_relative_paths=[image_relative_path],
                 force=bool(settings.get("force", process_task.force)),
-                mask_padding=int(settings.get("mask_padding", 8) or 8),
+                mask_padding=int(settings.get("mask_padding", 0) or 0),
                 use_bubble_mask=bool(settings.get("use_bubble_mask", True)),
                 use_crop_windows=bool(settings.get("use_crop_windows", True)),
                 device=str(settings.get("device", "") or ""),

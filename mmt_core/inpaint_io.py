@@ -71,6 +71,10 @@ def load_inpaint_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("bubble_mask_hash", "")
     payload.setdefault("output_mask_hash", "")
     payload.setdefault("output_bubble_mask_hash", "")
+    payload.setdefault("strict_ocr_bbox_mask", True)
+    payload.setdefault("model_loaded_at_service_start", False)
+    payload.setdefault("model_reused", False)
+    payload.setdefault("model_reload_count", 0)
     payload.setdefault("needs_inpaint", False)
     payload.setdefault("mask_created_at", "")
     payload.setdefault("mask_updated_at", "")
@@ -90,12 +94,13 @@ def load_inpaint_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("created_at", "")
     payload.setdefault("updated_at", "")
     payload["settings"] = {
-        "mask_padding": int(settings.get("mask_padding", 8) or 8),
+        "mask_padding": int(settings.get("mask_padding", 0) or 0),
         "use_bubble_mask": bool(settings.get("use_bubble_mask", True)),
         "use_crop_windows": bool(settings.get("use_crop_windows", True)),
         "crop_trigger_size": int(settings.get("crop_trigger_size", 800) or 800),
         "crop_margin": int(settings.get("crop_margin", 128) or 128),
         "resize_limit": int(settings.get("resize_limit", 1280) or 1280),
+        "strict_ocr_bbox_mask": bool(settings.get("strict_ocr_bbox_mask", True)),
     }
     return payload
 
@@ -117,6 +122,10 @@ def save_inpaint_json(path: Path | str, data: dict[str, Any]) -> Path:
         "bubble_mask_hash": str(data.get("bubble_mask_hash", "")),
         "output_mask_hash": str(data.get("output_mask_hash", "")),
         "output_bubble_mask_hash": str(data.get("output_bubble_mask_hash", "")),
+        "strict_ocr_bbox_mask": bool(data.get("strict_ocr_bbox_mask", True)),
+        "model_loaded_at_service_start": bool(data.get("model_loaded_at_service_start", False)),
+        "model_reused": bool(data.get("model_reused", False)),
+        "model_reload_count": int(data.get("model_reload_count", 0) or 0),
         "needs_inpaint": bool(data.get("needs_inpaint", False)),
         "mask_created_at": str(data.get("mask_created_at", "")),
         "mask_updated_at": str(data.get("mask_updated_at", "")),
@@ -136,12 +145,13 @@ def save_inpaint_json(path: Path | str, data: dict[str, Any]) -> Path:
         "created_at": str(data.get("created_at", "")),
         "updated_at": str(data.get("updated_at", "")),
         "settings": {
-            "mask_padding": int(settings.get("mask_padding", 8) or 8),
+            "mask_padding": int(settings.get("mask_padding", 0) or 0),
             "use_bubble_mask": bool(settings.get("use_bubble_mask", True)),
             "use_crop_windows": bool(settings.get("use_crop_windows", True)),
             "crop_trigger_size": int(settings.get("crop_trigger_size", 800) or 800),
             "crop_margin": int(settings.get("crop_margin", 128) or 128),
             "resize_limit": int(settings.get("resize_limit", 1280) or 1280),
+            "strict_ocr_bbox_mask": bool(settings.get("strict_ocr_bbox_mask", True)),
         },
     }
     return write_json_atomic(json_path, payload, indent=2, ensure_ascii=False)
@@ -198,6 +208,10 @@ def build_inpaint_metadata(
     inpaint_created_at: str | None = None,
     inpaint_updated_at: str | None = None,
     settings: dict[str, Any] | None = None,
+    strict_ocr_bbox_mask: bool = True,
+    model_loaded_at_service_start: bool = False,
+    model_reused: bool = False,
+    model_reload_count: int = 0,
 ) -> dict[str, Any]:
     root_path = ensure_path(project_root)
     return {
@@ -213,6 +227,10 @@ def build_inpaint_metadata(
         "bubble_mask_hash": str(bubble_mask_hash or ""),
         "output_mask_hash": str(output_mask_hash or ""),
         "output_bubble_mask_hash": str(output_bubble_mask_hash or ""),
+        "strict_ocr_bbox_mask": bool(strict_ocr_bbox_mask),
+        "model_loaded_at_service_start": bool(model_loaded_at_service_start),
+        "model_reused": bool(model_reused),
+        "model_reload_count": int(model_reload_count or 0),
         "needs_inpaint": bool(needs_inpaint),
         "mask_created_at": str(mask_created_at or created_at or _timestamp()),
         "mask_updated_at": str(mask_updated_at or updated_at or _timestamp()),

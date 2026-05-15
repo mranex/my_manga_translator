@@ -53,11 +53,13 @@ class InpaintService(BaseService):
             logger=lambda message: self._emit_log("info", message),
             manager=self._manager,
         )
+        self._emit_log("info", "LaMa model loaded once at service startup.")
         self._emit_log("info", str(result.get("message", "") or "LaMa Manga model ready."))
 
     def on_shutdown(self) -> None:
         try:
             unload_lama_model(logger=lambda message: self._emit_log("info", message), manager=self._manager)
+            self._emit_log("info", "LaMa unloaded on service shutdown.")
         except Exception as exc:
             self._emit_log("warning", f"Inpaint service shutdown cleanup failed: {exc}")
 
@@ -191,6 +193,11 @@ class InpaintService(BaseService):
         page_results: list[InpaintPageResult] = []
         bridge.message.emit(f"Starting inpaint for {total_pages} page(s).")
         bridge.progress.emit(0)
+        model_status = self._manager.status()
+        bridge.message.emit(
+            f"Using resident LaMa model on {str(model_status.get('device', '') or 'auto')} "
+            f"(reload_count={int(model_status.get('reload_count', 0) or 0)})."
+        )
 
         for index, image_relative_path in enumerate(task.image_relative_paths, start=1):
             self._check_canceled(command, message="Inpaint canceled before the next page.")
@@ -205,7 +212,6 @@ class InpaintService(BaseService):
                 }
             )
             try:
-                self._emit_log("info", f"before LaMa inference {page_name}")
                 image_path = run_inpaint_for_page(
                     task.project,
                     image_relative_path,
@@ -217,8 +223,8 @@ class InpaintService(BaseService):
                     logger=bridge.message.emit,
                     progress_callback=bridge.event.emit,
                     manager=self._manager,
+                    require_loaded_model=True,
                 )
-                self._emit_log("info", f"after LaMa inference {page_name}")
                 metadata = load_inpaint_json(inpaint_json_path(task.project, image_relative_path))
                 summary = summarize_inpaint_json(metadata)
             except Exception as exc:
@@ -275,12 +281,15 @@ class InpaintService(BaseService):
     ) -> LamaModelTaskResult:
         action = str(task.action or "").strip().lower()
         if action in {"load", "reload"}:
+            if action == "reload":
+                self._emit_log("info", "LaMa reload requested explicitly.", command=command)
             result = load_lama_model(
                 device=task.device,
                 crop_trigger_size=DEFAULT_CROP_TRIGGER_SIZE,
                 crop_margin=DEFAULT_CROP_MARGIN,
                 resize_limit=DEFAULT_RESIZE_LIMIT,
                 pad_mod=DEFAULT_PAD_MOD,
+                explicit_reload=(action == "reload"),
                 logger=bridge.message.emit,
                 manager=self._manager,
             )

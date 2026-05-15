@@ -146,7 +146,7 @@ class InpaintPanel(StagePanel):
 
         self.mask_padding_input = QSpinBox()
         self.mask_padding_input.setRange(0, 128)
-        self.mask_padding_input.setValue(8)
+        self.mask_padding_input.setValue(0)
         self.use_bubble_mask_checkbox = QCheckBox("Use bubble mask guidance")
         self.use_bubble_mask_checkbox.setChecked(True)
         self.use_crop_windows_checkbox = QCheckBox("Use crop windows")

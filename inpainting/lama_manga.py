@@ -438,7 +438,7 @@ class LamaMangaInpainter:
         self._model = model
         self.device = target_device
 
-    def _run_model_on_patch(self, image_bgr, text_mask, bubble_mask=None):
+    def _run_model_on_patch(self, image_bgr, text_mask, bubble_mask=None, *, require_loaded: bool = False):
         np_module = _require_numpy()
         working_image, remaining_mask, _ = apply_bubble_fill_fast_path(
             image_bgr,
@@ -448,7 +448,11 @@ class LamaMangaInpainter:
         if not np_module.any(remaining_mask):
             return working_image
 
-        self.load()
+        if require_loaded:
+            if self._model is None or torch is None:
+                raise LamaMangaUnavailable("LaMa Manga model is not loaded")
+        else:
+            self.load()
         if self._model is None or torch is None:
             raise LamaMangaUnavailable("LaMa Manga model is not loaded")
 
@@ -478,6 +482,8 @@ class LamaMangaInpainter:
         bubble_mask=None,
         text_regions: list | None = None,
         crop_windows: list[tuple[int, int, int, int]] | None = None,
+        *,
+        require_loaded: bool = False,
     ):
         np_module = _require_numpy()
         if image_bgr is None or getattr(image_bgr, "size", 0) == 0:
@@ -497,7 +503,12 @@ class LamaMangaInpainter:
         max_side = max(image_bgr.shape[0], image_bgr.shape[1])
         if windows:
             output = run_inpaint_crop(
-                self._run_model_on_patch,
+                lambda patch_image, patch_mask, patch_bubble_mask=None: self._run_model_on_patch(
+                    patch_image,
+                    patch_mask,
+                    patch_bubble_mask,
+                    require_loaded=require_loaded,
+                ),
                 image_bgr,
                 binary_mask,
                 bubble_mask=working_bubble_mask,
@@ -510,7 +521,12 @@ class LamaMangaInpainter:
             )
         elif max_side > self.crop_trigger_size:
             output = run_inpaint_crop(
-                self._run_model_on_patch,
+                lambda patch_image, patch_mask, patch_bubble_mask=None: self._run_model_on_patch(
+                    patch_image,
+                    patch_mask,
+                    patch_bubble_mask,
+                    require_loaded=require_loaded,
+                ),
                 image_bgr,
                 binary_mask,
                 bubble_mask=working_bubble_mask,
@@ -523,7 +539,12 @@ class LamaMangaInpainter:
             )
         elif max_side > self.resize_limit:
             output = run_inpaint_resize(
-                self._run_model_on_patch,
+                lambda patch_image, patch_mask, patch_bubble_mask=None: self._run_model_on_patch(
+                    patch_image,
+                    patch_mask,
+                    patch_bubble_mask,
+                    require_loaded=require_loaded,
+                ),
                 image_bgr,
                 binary_mask,
                 bubble_mask=working_bubble_mask,
@@ -531,9 +552,12 @@ class LamaMangaInpainter:
                 pad_mod=self.pad_mod,
             )
         else:
-            output = self._run_model_on_patch(image_bgr, binary_mask, working_bubble_mask)
-        if torch is not None and torch.cuda.is_available() and str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
+            output = self._run_model_on_patch(
+                image_bgr,
+                binary_mask,
+                working_bubble_mask,
+                require_loaded=require_loaded,
+            )
         return output
 
 

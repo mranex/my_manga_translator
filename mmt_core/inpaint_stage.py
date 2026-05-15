@@ -32,7 +32,7 @@ from .inpaint_masks import (
 )
 from .ocr_io import load_ocr_json, ocr_json_path
 
-DEFAULT_MASK_PADDING = 8
+DEFAULT_MASK_PADDING = 0
 DEFAULT_CROP_TRIGGER_SIZE = 800
 DEFAULT_CROP_MARGIN = 128
 DEFAULT_RESIZE_LIMIT = 1280
@@ -65,7 +65,7 @@ class _PreparedMaskBundle:
 
 
 class LamaInpainterManager:
-    """Process-level cache for the existing LaMa Manga inpainter."""
+    """Resident cache for a single long-lived LaMa Manga inpainter."""
 
     def __init__(self) -> None:
         self._inpainter: Any | None = None
@@ -74,7 +74,137 @@ class LamaInpainterManager:
         self._last_device: str | None = None
         self._owner_thread_id: int | None = None
         self._active_use_count = 0
+        self._load_count = 0
+        self._reload_count = 0
         self._lock = threading.RLock()
+
+    def load_once(
+        self,
+        *,
+        device: str | None,
+        crop_trigger_size: int = DEFAULT_CROP_TRIGGER_SIZE,
+        crop_margin: int = DEFAULT_CROP_MARGIN,
+        resize_limit: int = DEFAULT_RESIZE_LIMIT,
+        pad_mod: int = DEFAULT_PAD_MOD,
+        model_path: str | None = None,
+        explicit_reload: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            signature = _normalized_lama_signature(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
+            )
+            self._ensure_thread_ownership_locked()
+
+            if self._inpainter is not None and self._signature == signature and self._loaded and not explicit_reload:
+                resolved_device = str(self._last_device or signature[1] or "")
+                return {
+                    "loaded": True,
+                    "device": resolved_device,
+                    "reused": True,
+                    "reloaded": False,
+                    "signature": signature,
+                    "message": f"LaMa Manga model already loaded on {resolved_device or 'auto'}.",
+                }
+
+            if self._inpainter is not None and self._signature != signature and not explicit_reload:
+                raise RuntimeError(
+                    "Inpaint runtime model signature mismatch: "
+                    f"loaded={_format_lama_signature(self._signature)} "
+                    f"requested={_format_lama_signature(signature)}. "
+                    "Reload Inpaint Service before running."
+                )
+
+            if self._active_use_count > 0:
+                raise RuntimeError(
+                    "LaMa Manga is busy and cannot change configuration until the current inpaint task finishes."
+                )
+
+            had_loaded_model = self._inpainter is not None or self._loaded
+            if explicit_reload and had_loaded_model:
+                self._unload_unlocked(clear_cuda_cache=True)
+
+            if self._inpainter is None or self._signature != signature:
+                inpainting_module = _import_inpainting()
+                self._inpainter = inpainting_module.LamaMangaInpainter(
+                    model_path=signature[0],
+                    device=signature[1],
+                    crop_trigger_size=signature[2],
+                    crop_margin=signature[3],
+                    resize_limit=signature[4],
+                    pad_mod=signature[5],
+                )
+                self._signature = signature
+                self._loaded = False
+                self._owner_thread_id = threading.get_ident()
+
+            if not self._loaded:
+                self._inpainter.load()
+                self._loaded = True
+                self._load_count += 1
+                if explicit_reload and had_loaded_model:
+                    self._reload_count += 1
+                self._last_device = str(
+                    getattr(self._inpainter, "device", signature[1] or "") or signature[1] or ""
+                )
+
+            resolved_device = str(self._last_device or signature[1] or "")
+            return {
+                "loaded": True,
+                "device": resolved_device,
+                "reused": False,
+                "reloaded": bool(explicit_reload and had_loaded_model),
+                "signature": signature,
+                "message": (
+                    f"LaMa Manga model reloaded explicitly on {resolved_device or 'auto'}."
+                    if explicit_reload and had_loaded_model
+                    else f"LaMa Manga model loaded on {resolved_device or 'auto'}."
+                ),
+            }
+
+    def get_loaded_inpainter(
+        self,
+        *,
+        device: str | None,
+        crop_trigger_size: int = DEFAULT_CROP_TRIGGER_SIZE,
+        crop_margin: int = DEFAULT_CROP_MARGIN,
+        resize_limit: int = DEFAULT_RESIZE_LIMIT,
+        pad_mod: int = DEFAULT_PAD_MOD,
+        model_path: str | None = None,
+    ) -> Any:
+        with self._lock:
+            requested_signature = _normalized_lama_signature(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
+            )
+            self._ensure_thread_ownership_locked()
+            if self._inpainter is None or not self._loaded:
+                raise RuntimeError("LaMa Manga is not loaded. Reload Inpaint Service.")
+            if self._signature != requested_signature:
+                raise RuntimeError(
+                    "Inpaint runtime model signature mismatch: "
+                    f"loaded={_format_lama_signature(self._signature)} "
+                    f"requested={_format_lama_signature(requested_signature)}. "
+                    "Reload Inpaint Service before running."
+                )
+            return self._inpainter
+
+    def begin_inpaint_use(self) -> None:
+        with self._lock:
+            self._active_use_count += 1
+
+    def end_inpaint_use(self) -> None:
+        with self._lock:
+            if self._active_use_count > 0:
+                self._active_use_count -= 1
 
     def get_inpainter(
         self,
@@ -87,63 +217,31 @@ class LamaInpainterManager:
         model_path: str | None = None,
         preload: bool = False,
     ) -> Any:
-        with self._lock:
-            normalized_device = _normalize_device_value(device)
-            signature = (
-                model_path,
-                normalized_device,
-                int(crop_trigger_size),
-                int(crop_margin),
-                int(resize_limit),
-                int(pad_mod),
+        if preload:
+            self.load_once(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
             )
-            current_thread_id = threading.get_ident()
-            if self._active_use_count > 0 and self._owner_thread_id not in {None, current_thread_id}:
-                raise RuntimeError(
-                    "LaMa Manga is busy in another worker thread. Please wait for the current inpaint task to finish."
-                )
-            if self._inpainter is not None and self._owner_thread_id not in {None, current_thread_id}:
-                # Recreate the inpainter in the worker thread that is about to use it.
-                self._unload_unlocked()
-
-            if self._inpainter is None or self._signature != signature:
-                if self._active_use_count > 0:
-                    raise RuntimeError(
-                        "LaMa Manga is busy and cannot change configuration until the current inpaint task finishes."
-                    )
-                self._unload_unlocked()
-                inpainting_module = _import_inpainting()
-                self._inpainter = inpainting_module.LamaMangaInpainter(
-                    model_path=model_path,
-                    device=normalized_device,
-                    crop_trigger_size=int(crop_trigger_size),
-                    crop_margin=int(crop_margin),
-                    resize_limit=int(resize_limit),
-                    pad_mod=int(pad_mod),
-                )
-                self._signature = signature
-                self._loaded = False
-                self._owner_thread_id = current_thread_id
-            elif self._owner_thread_id is None:
-                self._owner_thread_id = current_thread_id
-
-            if preload and not self._loaded:
-                self._inpainter.load()
-                self._loaded = True
-                self._last_device = str(
-                    getattr(self._inpainter, "device", normalized_device) or normalized_device or ""
-                )
-
-            return self._inpainter
-
-    def begin_inpaint_use(self) -> None:
-        with self._lock:
-            self._active_use_count += 1
-
-    def end_inpaint_use(self) -> None:
-        with self._lock:
-            if self._active_use_count > 0:
-                self._active_use_count -= 1
+            return self.get_loaded_inpainter(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
+            )
+        return self.get_loaded_inpainter(
+            device=device,
+            crop_trigger_size=crop_trigger_size,
+            crop_margin=crop_margin,
+            resize_limit=resize_limit,
+            pad_mod=pad_mod,
+            model_path=model_path,
+        )
 
     def load(
         self,
@@ -155,22 +253,34 @@ class LamaInpainterManager:
         pad_mod: int = DEFAULT_PAD_MOD,
         model_path: str | None = None,
     ) -> dict[str, Any]:
-        inpainter = self.get_inpainter(
+        return self.load_once(
             device=device,
             crop_trigger_size=crop_trigger_size,
             crop_margin=crop_margin,
             resize_limit=resize_limit,
             pad_mod=pad_mod,
             model_path=model_path,
-            preload=True,
         )
-        resolved_device = str(getattr(inpainter, "device", _normalize_device_value(device) or "") or "")
-        self._last_device = resolved_device
-        return {
-            "loaded": True,
-            "device": resolved_device,
-            "message": f"LaMa Manga model is ready on {resolved_device or 'auto'}.",
-        }
+
+    def reload(
+        self,
+        *,
+        device: str | None,
+        crop_trigger_size: int = DEFAULT_CROP_TRIGGER_SIZE,
+        crop_margin: int = DEFAULT_CROP_MARGIN,
+        resize_limit: int = DEFAULT_RESIZE_LIMIT,
+        pad_mod: int = DEFAULT_PAD_MOD,
+        model_path: str | None = None,
+    ) -> dict[str, Any]:
+        return self.load_once(
+            device=device,
+            crop_trigger_size=crop_trigger_size,
+            crop_margin=crop_margin,
+            resize_limit=resize_limit,
+            pad_mod=pad_mod,
+            model_path=model_path,
+            explicit_reload=True,
+        )
 
     def unload(self) -> dict[str, Any]:
         with self._lock:
@@ -180,25 +290,36 @@ class LamaInpainterManager:
                     "device": self._last_device or "",
                     "message": "LaMa Manga is busy running inpaint. Wait for the current task to finish before unloading.",
                 }
-            return self._unload_unlocked()
+            return self._unload_unlocked(clear_cuda_cache=True)
 
-    def _unload_unlocked(self) -> dict[str, Any]:
+    def _ensure_thread_ownership_locked(self) -> None:
+        current_thread_id = threading.get_ident()
+        if self._owner_thread_id is None:
+            self._owner_thread_id = current_thread_id
+            return
+        if self._owner_thread_id != current_thread_id:
+            raise RuntimeError(
+                "LaMa Manga manager is owned by another thread. Reload Inpaint Service before running."
+            )
+
+    def _unload_unlocked(self, *, clear_cuda_cache: bool) -> dict[str, Any]:
         had_model = self._inpainter is not None
         self._inpainter = None
         self._signature = None
         self._loaded = False
         self._owner_thread_id = None
 
-        try:
-            import torch
-        except Exception:
-            torch = None
-
-        if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+        if clear_cuda_cache:
             try:
-                torch.cuda.empty_cache()
+                import torch
             except Exception:
-                pass
+                torch = None
+
+            if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
         gc.collect()
         return {
@@ -213,6 +334,9 @@ class LamaInpainterManager:
                 "loaded": bool(self._inpainter is not None and self._loaded),
                 "device": self._last_device or "",
                 "busy": self._active_use_count > 0,
+                "load_count": self._load_count,
+                "reload_count": self._reload_count,
+                "signature": _format_lama_signature(self._signature),
                 "message": (
                     f"LaMa Manga model busy on {self._last_device or 'auto'}."
                     if self._active_use_count > 0
@@ -242,21 +366,32 @@ def load_lama_model(
     resize_limit: int = DEFAULT_RESIZE_LIMIT,
     pad_mod: int = DEFAULT_PAD_MOD,
     model_path: str | None = None,
+    explicit_reload: bool = False,
     logger: Logger | None = None,
     manager: LamaInpainterManager | None = None,
 ) -> dict[str, Any]:
     """Preload the cached LaMa Manga model without running inpaint yet."""
 
     manager = manager or get_lama_model_manager()
-    _log(logger, "Loading LaMa Manga model...")
     try:
-        result = manager.load(
-            device=device,
-            crop_trigger_size=crop_trigger_size,
-            crop_margin=crop_margin,
-            resize_limit=resize_limit,
-            pad_mod=pad_mod,
-            model_path=model_path,
+        result = (
+            manager.reload(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
+            )
+            if explicit_reload
+            else manager.load_once(
+                device=device,
+                crop_trigger_size=crop_trigger_size,
+                crop_margin=crop_margin,
+                resize_limit=resize_limit,
+                pad_mod=pad_mod,
+                model_path=model_path,
+            )
         )
     except Exception as exc:
         raise RuntimeError(_friendly_inpaint_error(exc)) from exc
@@ -318,15 +453,18 @@ def run_inpaint_for_page(
     logger: Logger | None = None,
     progress_callback: ProgressCallback | None = None,
     manager: LamaInpainterManager | None = None,
+    require_loaded_model: bool = False,
 ) -> Path:
     """Run LaMa Manga inpainting for one page using cached OCR/detection data."""
 
     image_relative = str(Path(image_relative_path).as_posix())
+    page_name = Path(image_relative).name
+    _log(logger, f"[inpaint] before prepare mask {page_name}")
     _emit_progress(
         progress_callback,
         event="page_start",
         image_relative_path=image_relative,
-        message=f"Preparing inpaint mask for {Path(image_relative).name}",
+        message=f"Preparing inpaint mask for {page_name}",
     )
 
     bundle = _prepare_mask_bundle(
@@ -339,6 +477,7 @@ def run_inpaint_for_page(
         device=device or "",
         logger=logger,
     )
+    _log(logger, f"[inpaint] after prepare mask {page_name}")
     current_settings = _settings_payload(
         mask_padding=mask_padding,
         use_bubble_mask=use_bubble_mask,
@@ -360,20 +499,25 @@ def run_inpaint_for_page(
                 "item_count": int(bundle.metadata.get("item_count", 0) or 0),
                 "masked_pixel_count": int(bundle.metadata.get("masked_pixel_count", 0) or 0),
             },
-            message=f"Reused cached inpaint result for {Path(image_relative).name}",
+            message=f"Reused cached inpaint result for {page_name}",
         )
         return bundle.output_image_path
 
+    _log(logger, f"[inpaint] before load image/mask {page_name}")
     source_image = load_image_bgr(bundle.source_image_path)
     text_mask = load_image_grayscale(bundle.text_mask_file)
     bubble_mask = load_image_grayscale(bundle.bubble_mask_file) if bundle.bubble_mask_file else None
+    _log(logger, f"[inpaint] after load image/mask {page_name}")
+    _log(logger, f"[inpaint] before crop window build {page_name}")
     crop_windows = build_crop_windows_from_boxes(bundle.valid_boxes, source_image.shape) if use_crop_windows else []
+    _log(logger, f"[inpaint] after crop window build {page_name}")
 
     metadata = dict(bundle.metadata)
     metadata["status"] = "running"
     metadata["error"] = ""
     metadata["needs_inpaint"] = True
     metadata["device"] = _normalize_device_value(device) or ""
+    metadata["strict_ocr_bbox_mask"] = True
     metadata["updated_at"] = _timestamp()
     metadata["inpaint_created_at"] = str(metadata.get("inpaint_created_at", "") or _timestamp())
     metadata["inpaint_updated_at"] = metadata["updated_at"]
@@ -388,34 +532,67 @@ def run_inpaint_for_page(
             "item_count": bundle.item_count,
             "masked_pixel_count": bundle.masked_pixel_count,
         },
-        message=f"Inpaint mask ready for {Path(image_relative).name}",
+        message=f"Inpaint mask ready for {page_name}",
     )
 
     manager = manager or get_lama_model_manager()
     inpainter = None
     try:
+        _log(logger, f"[inpaint] before resident model acquire {page_name}")
+        model_result = (
+            {
+                "loaded": True,
+                "device": manager.status().get("device", "") if hasattr(manager, "status") else "",
+                "reused": True,
+                "reloaded": False,
+            }
+            if require_loaded_model
+            else {}
+        )
+        if require_loaded_model:
+            inpainter = manager.get_loaded_inpainter(
+                device=device,
+                crop_trigger_size=DEFAULT_CROP_TRIGGER_SIZE,
+                crop_margin=DEFAULT_CROP_MARGIN,
+                resize_limit=DEFAULT_RESIZE_LIMIT,
+                pad_mod=DEFAULT_PAD_MOD,
+            )
+        else:
+            model_result = manager.load_once(
+                device=device,
+                crop_trigger_size=DEFAULT_CROP_TRIGGER_SIZE,
+                crop_margin=DEFAULT_CROP_MARGIN,
+                resize_limit=DEFAULT_RESIZE_LIMIT,
+                pad_mod=DEFAULT_PAD_MOD,
+            )
+            inpainter = manager.get_loaded_inpainter(
+                device=device,
+                crop_trigger_size=DEFAULT_CROP_TRIGGER_SIZE,
+                crop_margin=DEFAULT_CROP_MARGIN,
+                resize_limit=DEFAULT_RESIZE_LIMIT,
+                pad_mod=DEFAULT_PAD_MOD,
+            )
+        _log(logger, f"[inpaint] after resident model acquire {page_name}")
         _emit_progress(
             progress_callback,
-            event="model_loading",
+            event="model_ready",
             image_relative_path=image_relative,
-            message=f"Loading LaMa Manga model for {Path(image_relative).name}",
+            message=f"Using resident LaMa model for {page_name}",
         )
-        inpainter = manager.get_inpainter(
-            device=device,
-            crop_trigger_size=DEFAULT_CROP_TRIGGER_SIZE,
-            crop_margin=DEFAULT_CROP_MARGIN,
-            resize_limit=DEFAULT_RESIZE_LIMIT,
-            pad_mod=DEFAULT_PAD_MOD,
-            preload=True,
-        )
+        _log(logger, f"Using resident LaMa model for {page_name}")
         manager.begin_inpaint_use()
+        _log(logger, f"[inpaint] before LaMa inference {page_name}")
         output_image = inpainter.inpaint(
             source_image,
             text_mask,
             bubble_mask=bubble_mask,
             crop_windows=crop_windows if use_crop_windows else None,
+            require_loaded=require_loaded_model,
         )
+        _log(logger, f"[inpaint] after LaMa inference {page_name}")
+        _log(logger, f"[inpaint] before save output {page_name}")
         save_png_image(output_image, bundle.output_image_path)
+        _log(logger, f"[inpaint] after save output {page_name}")
     except Exception as exc:
         readable_error = _friendly_inpaint_error(exc)
         metadata["status"] = "error"
@@ -433,27 +610,30 @@ def run_inpaint_for_page(
                 "item_count": bundle.item_count,
                 "masked_pixel_count": bundle.masked_pixel_count,
             },
-            message=f"Inpaint failed for {Path(image_relative).name}: {readable_error}",
+            message=f"Inpaint failed for {page_name}: {readable_error}",
         )
         raise RuntimeError(readable_error) from exc
     finally:
         if inpainter is not None:
             manager.end_inpaint_use()
 
+    manager_status = manager.status() if hasattr(manager, "status") else {}
     metadata["status"] = "done"
     metadata["error"] = ""
     metadata["needs_inpaint"] = False
     metadata["device"] = str(getattr(inpainter, "device", _normalize_device_value(device) or "") or "")
     metadata["output_mask_hash"] = str(metadata.get("text_mask_hash", "") or "")
     metadata["output_bubble_mask_hash"] = str(metadata.get("bubble_mask_hash", "") or "")
+    metadata["model_loaded_at_service_start"] = bool(require_loaded_model)
+    metadata["model_reused"] = bool(model_result.get("reused", True))
+    metadata["model_reload_count"] = int(manager_status.get("reload_count", 0) or 0)
     metadata["updated_at"] = _timestamp()
     metadata["inpaint_created_at"] = str(metadata.get("inpaint_created_at", "") or metadata["updated_at"])
     metadata["inpaint_updated_at"] = metadata["updated_at"]
     save_inpaint_json(bundle.metadata_path, metadata)
-    manager._loaded = True
-    manager._last_device = metadata["device"]
 
     _log(logger, f"Inpainted page saved to {bundle.output_image_path}")
+    _log(logger, f"[inpaint] before emit page_done {page_name}")
     _emit_progress(
         progress_callback,
         event="page_done",
@@ -463,8 +643,9 @@ def run_inpaint_for_page(
             "item_count": bundle.item_count,
             "masked_pixel_count": bundle.masked_pixel_count,
         },
-        message=f"Inpaint complete for {Path(image_relative).name}",
+        message=f"Inpaint complete for {page_name}",
     )
+    _log(logger, f"[inpaint] after emit page_done {page_name}")
     return bundle.output_image_path
 
 
@@ -480,6 +661,7 @@ def run_inpaint_for_pages(
     logger: Logger | None = None,
     progress_callback: ProgressCallback | None = None,
     manager: LamaInpainterManager | None = None,
+    require_loaded_model: bool = False,
 ) -> list[Path]:
     """Run inpainting sequentially across multiple pages."""
 
@@ -509,6 +691,7 @@ def run_inpaint_for_pages(
             logger=logger,
             progress_callback=progress_callback,
             manager=manager,
+            require_loaded_model=require_loaded_model,
         )
         output_paths.append(output_path)
 
@@ -579,6 +762,7 @@ def _prepare_mask_bundle(
         source_image.shape,
         get_active_canon_items(detection_data["canon_state"]),
         padding=mask_padding,
+        strict_mask=True,
         return_stats=True,
     )
     if not valid_boxes or masked_pixel_count <= 0:
@@ -617,6 +801,10 @@ def _prepare_mask_bundle(
                 use_bubble_mask=use_bubble_mask,
                 use_crop_windows=use_crop_windows,
             ),
+            strict_ocr_bbox_mask=True,
+            model_loaded_at_service_start=False,
+            model_reused=False,
+            model_reload_count=int((existing_metadata or {}).get("model_reload_count", 0) or 0),
         )
         save_inpaint_json(metadata_path, error_metadata)
         raise ValueError(error_message)
@@ -699,6 +887,10 @@ def _prepare_mask_bundle(
         inpaint_created_at=inpaint_created_at,
         inpaint_updated_at=(existing_metadata or {}).get("inpaint_updated_at"),
         settings=current_settings,
+        strict_ocr_bbox_mask=True,
+        model_loaded_at_service_start=False,
+        model_reused=False,
+        model_reload_count=int((existing_metadata or {}).get("model_reload_count", 0) or 0),
     )
     save_inpaint_json(metadata_path, metadata)
     _log(logger, f"Prepared inpaint mask for {Path(image_relative).name}: {text_mask_file}")
@@ -757,6 +949,7 @@ def _settings_payload(
         "crop_trigger_size": DEFAULT_CROP_TRIGGER_SIZE,
         "crop_margin": DEFAULT_CROP_MARGIN,
         "resize_limit": DEFAULT_RESIZE_LIMIT,
+        "strict_ocr_bbox_mask": True,
     }
 
 
@@ -767,6 +960,40 @@ def _normalize_device_value(device: str | None) -> str | None:
     if not normalized or normalized.lower() == "auto":
         return None
     return normalized
+
+
+def _normalized_lama_signature(
+    *,
+    device: str | None,
+    crop_trigger_size: int,
+    crop_margin: int,
+    resize_limit: int,
+    pad_mod: int,
+    model_path: str | None,
+) -> tuple[str | None, str | None, int, int, int, int]:
+    normalized_model_path = str(model_path).strip() if model_path is not None and str(model_path).strip() else None
+    return (
+        normalized_model_path,
+        _normalize_device_value(device),
+        int(crop_trigger_size),
+        int(crop_margin),
+        int(resize_limit),
+        int(pad_mod),
+    )
+
+
+def _format_lama_signature(signature: tuple[str | None, str | None, int, int, int, int] | None) -> str:
+    if signature is None:
+        return "unloaded"
+    model_path, device, crop_trigger_size, crop_margin, resize_limit, pad_mod = signature
+    return (
+        f"model_path={model_path or 'default'}, "
+        f"device={device or 'auto'}, "
+        f"crop_trigger_size={crop_trigger_size}, "
+        f"crop_margin={crop_margin}, "
+        f"resize_limit={resize_limit}, "
+        f"pad_mod={pad_mod}"
+    )
 
 
 def _canon_state_needs_text_mask_backfill(detection_data: dict[str, Any]) -> bool:
@@ -852,6 +1079,10 @@ def _hash_mask_image(mask: Any) -> str:
 def _friendly_inpaint_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     lower_message = message.lower()
+    if "is not loaded. reload inpaint service" in lower_message:
+        return "LaMa Manga is not loaded. Reload Inpaint Service."
+    if "runtime model signature mismatch" in lower_message:
+        return message
     if "no valid ocr bounding boxes" in lower_message or "no active canon ocr target boxes" in lower_message:
         return "No valid OCR target boxes were available to build an inpaint mask."
     if "ocr cache is missing" in lower_message:

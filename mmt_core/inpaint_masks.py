@@ -57,9 +57,10 @@ def build_text_mask_from_ocr(
     image_shape: Sequence[int],
     ocr_items: Sequence[dict[str, Any]],
     *,
-    padding: int = 8,
+    padding: int = 0,
     include_skipped_items: bool = True,
     min_box_area: int = 16,
+    strict_mask: bool = True,
 ) -> tuple[Any, list[tuple[int, int, int, int]], int]:
     """Build a binary text-removal mask from OCR cache items."""
 
@@ -78,7 +79,9 @@ def build_text_mask_from_ocr(
             continue
 
         bbox = item.get("ocr_bbox") or item.get("bbox")
-        resolved_bbox = expand_bbox(clamp_bbox(bbox, image_shape), image_shape, padding)
+        resolved_bbox = clamp_bbox(bbox, image_shape)
+        if resolved_bbox is not None and int(padding) > 0:
+            resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
         if resolved_bbox is None:
             continue
         if bbox_area(resolved_bbox) < int(min_box_area):
@@ -88,7 +91,8 @@ def build_text_mask_from_ocr(
         mask[y1:y2, x1:x2] = 255
         valid_boxes.append(resolved_bbox)
 
-    mask = _close_mask(mask, 3 if padding <= 4 else 5)
+    if not strict_mask or int(padding) > 0:
+        mask = _close_mask(mask, 3 if padding <= 4 else 5)
     mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
     return mask, valid_boxes, int(np_module.count_nonzero(mask))
 
@@ -97,8 +101,9 @@ def build_text_mask_from_canon_items(
     image_shape: Sequence[int],
     canon_items: Sequence[dict[str, Any]],
     *,
-    padding: int = 8,
+    padding: int = 0,
     min_box_area: int = 16,
+    strict_mask: bool = True,
     return_stats: bool = False,
 ) -> tuple[Any, list[tuple[int, int, int, int]], int] | tuple[Any, list[tuple[int, int, int, int]], int, dict[str, int]]:
     """Build a binary text-removal mask from active canon items.
@@ -115,6 +120,7 @@ def build_text_mask_from_canon_items(
         canon_items,
         padding=padding,
         min_box_area=min_box_area,
+        strict_mask=strict_mask,
         return_stats=return_stats,
     )
 
@@ -123,8 +129,9 @@ def build_text_mask_from_canon_ocr_bboxes(
     image_shape: Sequence[int],
     canon_items: Sequence[dict[str, Any]],
     *,
-    padding: int = 8,
+    padding: int = 0,
     min_box_area: int = 16,
+    strict_mask: bool = True,
     return_stats: bool = False,
 ) -> tuple[Any, list[tuple[int, int, int, int]], int] | tuple[Any, list[tuple[int, int, int, int]], int, dict[str, int]]:
     """Build a binary text-removal mask from canon OCR targets."""
@@ -152,7 +159,8 @@ def build_text_mask_from_canon_ocr_bboxes(
             resolved_bbox = clamp_bbox(raw_bbox, image_shape)
             used_fallback = resolved_bbox is not None
 
-        resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
+        if resolved_bbox is not None and int(padding) > 0:
+            resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
         if resolved_bbox is None or bbox_area(resolved_bbox) < int(min_box_area):
             skipped_invalid_bbox_count += 1
             continue
@@ -164,7 +172,8 @@ def build_text_mask_from_canon_ocr_bboxes(
         if used_fallback:
             fallback_to_bbox_count += 1
 
-    mask = _close_mask(mask, 3 if padding <= 4 else 5)
+    if not strict_mask or int(padding) > 0:
+        mask = _close_mask(mask, 3 if padding <= 4 else 5)
     mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
     masked_pixel_count = int(np_module.count_nonzero(mask))
     if not return_stats:

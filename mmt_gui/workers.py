@@ -238,7 +238,7 @@ class InpaintMaskTask(PipelineTask):
     project: Any = None
     image_relative_paths: list[str] = field(default_factory=list)
     force: bool = False
-    mask_padding: int = 8
+    mask_padding: int = 0
     use_bubble_mask: bool = True
 
 
@@ -274,7 +274,7 @@ class InpaintTask(PipelineTask):
     project: Any = None
     image_relative_paths: list[str] = field(default_factory=list)
     force: bool = False
-    mask_padding: int = 8
+    mask_padding: int = 0
     use_bubble_mask: bool = True
     use_crop_windows: bool = True
     device: str | None = None
