@@ -243,10 +243,11 @@ def load_lama_model(
     pad_mod: int = DEFAULT_PAD_MOD,
     model_path: str | None = None,
     logger: Logger | None = None,
+    manager: LamaInpainterManager | None = None,
 ) -> dict[str, Any]:
     """Preload the cached LaMa Manga model without running inpaint yet."""
 
-    manager = get_lama_model_manager()
+    manager = manager or get_lama_model_manager()
     _log(logger, "Loading LaMa Manga model...")
     try:
         result = manager.load(
@@ -264,10 +265,14 @@ def load_lama_model(
     return result
 
 
-def unload_lama_model(logger: Logger | None = None) -> dict[str, Any]:
+def unload_lama_model(
+    logger: Logger | None = None,
+    *,
+    manager: LamaInpainterManager | None = None,
+) -> dict[str, Any]:
     """Release the cached LaMa Manga model and free CUDA cache when available."""
 
-    manager = get_lama_model_manager()
+    manager = manager or get_lama_model_manager()
     result = manager.unload()
     _log(logger, result["message"])
     return result
@@ -312,6 +317,7 @@ def run_inpaint_for_page(
     device: str | None = None,
     logger: Logger | None = None,
     progress_callback: ProgressCallback | None = None,
+    manager: LamaInpainterManager | None = None,
 ) -> Path:
     """Run LaMa Manga inpainting for one page using cached OCR/detection data."""
 
@@ -385,7 +391,7 @@ def run_inpaint_for_page(
         message=f"Inpaint mask ready for {Path(image_relative).name}",
     )
 
-    manager = get_lama_model_manager()
+    manager = manager or get_lama_model_manager()
     inpainter = None
     try:
         _emit_progress(
@@ -473,6 +479,7 @@ def run_inpaint_for_pages(
     device: str | None = None,
     logger: Logger | None = None,
     progress_callback: ProgressCallback | None = None,
+    manager: LamaInpainterManager | None = None,
 ) -> list[Path]:
     """Run inpainting sequentially across multiple pages."""
 
@@ -501,6 +508,7 @@ def run_inpaint_for_pages(
             device=device,
             logger=logger,
             progress_callback=progress_callback,
+            manager=manager,
         )
         output_paths.append(output_path)
 

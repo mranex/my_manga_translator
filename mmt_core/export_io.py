@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from .image_io import ensure_path
+from .json_io import write_json_atomic
 
 EXPORT_SCHEMA_VERSION = 1
 INVALID_WINDOWS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -67,8 +68,7 @@ def export_zip_path(output_dir: Path | str, zip_name: str, overwrite: bool) -> P
 def save_export_manifest(path: Path | str, data: dict[str, Any]) -> Path:
     manifest_path = ensure_path(path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    return manifest_path
+    return write_json_atomic(manifest_path, data, indent=2, ensure_ascii=False)
 
 
 def build_export_basename(

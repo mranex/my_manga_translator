@@ -10,6 +10,7 @@ from typing import Any, Protocol, Sequence
 from .canon_state import canon_item_bbox, ensure_canon_state, resolve_canon_item_for_stage_item
 from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import ensure_path, project_relative_path
+from .json_io import write_json_atomic
 from .ocr_io import load_ocr_json, ocr_json_path
 from .translation_models import TranslationConfig
 
@@ -97,8 +98,7 @@ def save_translation_json(path: Path | str, data: dict[str, Any]) -> Path:
         "updated_at": str(data.get("updated_at", "")),
         "items": [normalize_translation_item(item) for item in data.get("items", [])],
     }
-    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return json_path
+    return write_json_atomic(json_path, payload, indent=2, ensure_ascii=False)
 
 
 def initialize_translation_from_ocr(

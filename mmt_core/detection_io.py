@@ -10,6 +10,7 @@ from typing import Any, Callable, Protocol, Sequence
 from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult, TextRegion
 
 from .image_io import ensure_path, project_relative_path, save_png_image
+from .json_io import write_json_atomic
 
 DETECTION_SCHEMA_VERSION = 1
 
@@ -170,8 +171,7 @@ def save_detection_json(path: Path | str, data: dict[str, Any]) -> Path:
     canon_state = data.get("canon_state")
     if isinstance(canon_state, dict):
         payload["canon_state"] = _json_safe(canon_state)
-    output_path.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
-    return output_path
+    return write_json_atomic(output_path, _json_safe(payload), indent=2, ensure_ascii=False)
 
 
 def _serialize_bubble(

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .image_io import ensure_path
+from .json_io import write_json_atomic
 
 RENDER_SCHEMA_VERSION = 1
 
@@ -140,8 +141,7 @@ def save_render_json(path: Path | str, data: dict[str, Any]) -> Path:
         },
         "items": [normalize_render_item(item) for item in data.get("items", [])],
     })
-    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return json_path
+    return write_json_atomic(json_path, payload, indent=2, ensure_ascii=False)
 
 
 def summarize_render_json(data: dict[str, Any]) -> dict[str, int | str]:

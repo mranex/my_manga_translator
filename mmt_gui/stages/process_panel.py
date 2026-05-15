@@ -109,6 +109,19 @@ class ProcessPanel(StagePanel):
         summary_card.content_layout.addLayout(summary_form)
         self.content_layout.addWidget(summary_card)
 
+        services_card = CollapsibleSection("Resident Services", expanded=False)
+        services_form = QFormLayout()
+        services_form.setContentsMargins(0, 0, 0, 0)
+        services_form.setSpacing(8)
+        self._service_labels: dict[str, QLabel] = {}
+        for service_name in ("detection", "ocr", "translation", "inpaint", "render", "export", "process"):
+            label = QLabel("Starting...")
+            label.setWordWrap(True)
+            self._service_labels[service_name] = label
+            services_form.addRow(f"{service_name.title()}:", label)
+        services_card.content_layout.addLayout(services_form)
+        self.content_layout.addWidget(services_card)
+
         pipeline_card = CollapsibleSection("Pipeline Steps", expanded=True)
         pipeline_form = QFormLayout()
         pipeline_form.setContentsMargins(0, 0, 0, 0)
@@ -194,6 +207,15 @@ class ProcessPanel(StagePanel):
         self.target_language_value.setText(str(target_language or "-"))
         self.inpaint_device_value.setText(str(inpaint_device or "-"))
         self.render_style_value.setText(str(render_style or "-"))
+
+    def set_service_status(self, service_name: str, state: str, message: str | None = None) -> None:
+        label = self._service_labels.get(str(service_name or "").strip().lower())
+        if label is None:
+            return
+        state_text = str(state or "unknown").strip().lower() or "unknown"
+        pretty_state = state_text.replace("_", " ").title()
+        detail = str(message or "").strip()
+        label.setText(f"{pretty_state}: {detail}" if detail else pretty_state)
 
     def reset_process_state(self, *, scope_text: str) -> None:
         self.set_scope_summary(scope_text)

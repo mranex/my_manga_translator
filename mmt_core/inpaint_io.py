@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .image_io import ensure_path, project_relative_path
+from .json_io import write_json_atomic
 
 INPAINT_SCHEMA_VERSION = 1
 
@@ -143,8 +144,7 @@ def save_inpaint_json(path: Path | str, data: dict[str, Any]) -> Path:
             "resize_limit": int(settings.get("resize_limit", 1280) or 1280),
         },
     }
-    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return json_path
+    return write_json_atomic(json_path, payload, indent=2, ensure_ascii=False)
 
 
 def summarize_inpaint_json(data: dict[str, Any]) -> dict[str, Any]:

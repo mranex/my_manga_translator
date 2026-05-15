@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from .image_io import ensure_path, project_relative_path
+from .json_io import write_json_atomic
 
 OCR_SCHEMA_VERSION = 1
 
@@ -79,8 +80,7 @@ def save_ocr_payload(payload: dict[str, Any], output_path: Path | str) -> Path:
         "items": [normalize_ocr_item(item) for item in payload.get("items", [])],
         }
     )
-    json_path.write_text(json.dumps(_json_safe(normalized_payload), indent=2), encoding="utf-8")
-    return json_path
+    return write_json_atomic(json_path, _json_safe(normalized_payload), indent=2, ensure_ascii=False)
 
 
 def load_ocr_json(path: Path | str) -> dict[str, Any]:

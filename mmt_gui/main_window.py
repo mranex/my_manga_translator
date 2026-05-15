@@ -82,6 +82,7 @@ from .app_settings import AppSettings
 from .page_status import get_page_workflow_status
 from .project import MangaProject, PROJECT_FILENAME, remove_page_from_project
 from .preview_controller import PreviewController, PreviewPreferences
+from .services import ServiceCommandHandle, ServiceManager, ServiceStatusSnapshot
 from .stages import (
     DetectionPanel,
     ExportPanel,
@@ -228,11 +229,14 @@ class MainWindow(QMainWindow):
         self.toggle_developer_log_action = None
         self.developer_log_dock: QDockWidget | None = None
         self._busy_stages: set[str] = set()
-        self._active_process_worker: TaskWorker | None = None
+        self._busy_stage_counts: dict[str, int] = {}
+        self._active_process_worker: TaskWorker | ServiceCommandHandle | None = None
         self._process_cancel_requested = False
+        self._service_statuses: dict[str, ServiceStatusSnapshot] = {}
+        self.service_manager: ServiceManager | None = None
 
         self.thread_pool = QThreadPool.globalInstance()
-        self._active_workers: list[TaskWorker] = []
+        self._active_workers: list[TaskWorker | ServiceCommandHandle] = []
 
         default_server_url = "http://127.0.0.1:8080"
         default_model_path = self.workspace_root / "model" / "paddleocr_vl" / "model.gguf"
@@ -259,6 +263,22 @@ class MainWindow(QMainWindow):
         status_bar.messageChanged.connect(self.header.set_status_text)
         self.setStatusBar(status_bar)
         self.statusBar().hide()
+
+        self.service_manager = ServiceManager(
+            workspace_root=self.workspace_root,
+            startup_options={
+                "preload_detection": self.app_settings.bool_value("services/preload_detection_on_startup", False),
+                "preload_inpaint": self.app_settings.bool_value("services/preload_inpaint_on_startup", False),
+                "inpaint_device": self.app_settings.string_value("services/inpaint_startup_device", ""),
+            },
+            parent=self,
+        )
+        self.service_manager.service_status_changed.connect(self._on_service_status_changed)
+        self.service_manager.diagnostic_message.connect(
+            lambda message, level: self.log(message, level=str(level or "info"))
+        )
+        self.header.set_service_status_text("Services: starting...")
+        self.service_manager.start_services()
 
         self.header.theme_changed.connect(self._on_theme_changed)
         self.left_toolbar.auto_preview_changed.connect(self._on_auto_preview_changed)
@@ -1737,7 +1757,58 @@ class MainWindow(QMainWindow):
         return "process" in self._busy_stages or self._active_process_worker is not None
 
     def _workflow_busy(self) -> bool:
-        return bool(self._active_workers or self._busy_stages)
+        manager_busy = bool(self.service_manager is not None and self.service_manager.has_active_commands())
+        return bool(self._active_workers or self._busy_stages or manager_busy)
+
+    def _submit_service_task(
+        self,
+        task: Any,
+        *,
+        progress_label: str | None,
+        finished_handler: Any,
+        failed_handler: Any,
+        event_handler: Any | None = None,
+    ) -> ServiceCommandHandle:
+        if self.service_manager is None:
+            raise RuntimeError("Resident service manager is not available.")
+        handle = self.service_manager.dispatch_task(task)
+        self._active_workers.append(handle)
+        self._attach_worker_signals(
+            handle,
+            progress_label=progress_label,
+            finished_handler=finished_handler,
+            failed_handler=failed_handler,
+            event_handler=event_handler,
+        )
+        return handle
+
+    def _on_service_status_changed(self, payload: object) -> None:
+        if not isinstance(payload, ServiceStatusSnapshot):
+            return
+        self._service_statuses[payload.service_name] = payload
+        if hasattr(self, "process_panel"):
+            self.process_panel.set_service_status(payload.service_name, payload.state, payload.message)
+        self._refresh_service_status_summary()
+        if payload.state == "error":
+            self.statusBar().showMessage(f"{payload.service_name.title()} service error: {payload.message}")
+
+    def _refresh_service_status_summary(self) -> None:
+        if not self._service_statuses:
+            self.header.set_service_status_text("Services: starting...")
+            return
+        states = [snapshot.state for snapshot in self._service_statuses.values()]
+        ready_count = len([state for state in states if state in {"ready", "idle"}])
+        loading_count = len([state for state in states if state in {"starting", "loading"}])
+        running_count = len([state for state in states if state in {"queued", "running"}])
+        error_count = len([state for state in states if state == "error"])
+        summary_parts = [f"Services: {ready_count}/{len(states)} ready"]
+        if loading_count:
+            summary_parts.append(f"{loading_count} loading")
+        if running_count:
+            summary_parts.append(f"{running_count} busy")
+        if error_count:
+            summary_parts.append(f"{error_count} error")
+        self.header.set_service_status_text(" | ".join(summary_parts))
 
     def _heavy_model_busy_stage(self, *, excluding_stage: str | None = None) -> str | None:
         excluded = str(excluding_stage or "").strip().lower()
@@ -2729,6 +2800,11 @@ class MainWindow(QMainWindow):
             self._persist_workspace_state()
         except Exception as exc:
             self.log(f"Settings save failure during close: {exc}")
+        try:
+            if self.service_manager is not None:
+                self.service_manager.shutdown()
+        except Exception as exc:
+            self.log(f"Resident service shutdown failure: {exc}", level="warning")
         super().closeEvent(event)
 
     def current_page(self) -> str | None:
@@ -3648,27 +3724,30 @@ class MainWindow(QMainWindow):
             inpaint_settings=dict(inpaint_settings),
             render_config=render_config,
         )
-        worker = create_process_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Process progress",
-            finished_handler=self._on_process_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_process_worker_failed(
-                message,
-                active_worker,
+        try:
+            worker = self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload, process_scope=scope: self._on_process_worker_event(
-                payload,
-                scope=process_scope,
-            ),
-        )
-        self._active_workers.append(worker)
+                progress_label="Process progress",
+                finished_handler=self._on_process_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_process_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload, process_scope=scope: self._on_process_worker_event(
+                    payload,
+                    scope=process_scope,
+                ),
+            )
+        except Exception as exc:
+            self._process_stage_status = "error"
+            self._set_process_ui_running(False)
+            self.show_error("Process service unavailable", str(exc))
+            return
         self._active_process_worker = worker
         self._set_process_ui_running(True)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Running one-click process...")
-        self.thread_pool.start(worker)
 
     def _start_export_task(
         self,
@@ -3692,27 +3771,29 @@ class MainWindow(QMainWindow):
             current_page=current_page,
             selected_pages=list(selected_pages or []),
         )
-        worker = create_export_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Export progress",
-            finished_handler=lambda result, active_worker: self._on_export_worker_finished(
-                result,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            failed_handler=lambda message, active_worker: self._on_export_worker_failed(
-                message,
-                active_worker,
-                task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("export", payload, is_batch=config.page_scope != "current"),
-        )
-        self._active_workers.append(worker)
+                progress_label="Export progress",
+                finished_handler=lambda result, active_worker: self._on_export_worker_finished(
+                    result,
+                    active_worker,
+                    task,
+                ),
+                failed_handler=lambda message, active_worker: self._on_export_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("export", payload, is_batch=config.page_scope != "current"),
+            )
+        except Exception as exc:
+            self.export_panel.set_actions_enabled(True)
+            self.show_error("Export service unavailable", str(exc))
+            return
         self.export_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Exporting pages...")
-        self.thread_pool.start(worker)
 
     def _open_output_folder(self, output_dir: str | Path) -> bool:
         target_dir = Path(output_dir).expanduser().resolve()
@@ -3738,20 +3819,6 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             self.show_error("No project open", "Create or open a project before running detection.")
             return
-        if "detection" in self._busy_stages:
-            self.show_error("Detection is already running", "Wait for the current detection task to finish first.")
-            return
-        if not self._ensure_heavy_model_stage_available(
-            requested_stage="detection",
-            action_label="Detection",
-        ):
-            return
-        if self._active_workers or self._busy_stages:
-            self.show_error(
-                "Workflow already running",
-                "Wait for the current workflow task to finish before starting detection.",
-            )
-            return
         self._persist_panel_preferences()
         if self.detection_panel.edit_mode_enabled():
             self.detection_panel.set_edit_mode_checked(False)
@@ -3767,23 +3834,25 @@ class MainWindow(QMainWindow):
             masks_cache_dir=self.current_project.cache_dir / "masks",
             force=force,
         )
-        worker = create_detection_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Detection progress",
-            finished_handler=self._on_detection_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_detection_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("detection", payload, is_batch=len(image_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Detection progress",
+                finished_handler=self._on_detection_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_detection_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("detection", payload, is_batch=len(image_paths) > 1),
+            )
+        except Exception as exc:
+            self.detection_panel.set_actions_enabled(True)
+            self.show_error("Detection service unavailable", str(exc))
+            return
         self.detection_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Detection is running...")
-        self.thread_pool.start(worker)
 
     def _start_ocr_preparation_task(
         self,
@@ -3805,23 +3874,25 @@ class MainWindow(QMainWindow):
             force=force,
             save_crops=True,
         )
-        worker = create_ocr_preparation_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="OCR preparation progress",
-            finished_handler=self._on_ocr_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_ocr_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("ocr_prepare", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="OCR preparation progress",
+                finished_handler=self._on_ocr_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_ocr_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("ocr_prepare", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.ocr_panel.set_actions_enabled(True)
+            self.show_error("OCR service unavailable", str(exc))
+            return
         self.ocr_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Preparing OCR items...")
-        self.thread_pool.start(worker)
 
     def _start_ocr_inference_task(
         self,
@@ -3848,23 +3919,25 @@ class MainWindow(QMainWindow):
             selected_item_ids_by_page=selected_item_ids_by_page or {},
             timeout=float(ocr_config.timeout),
         )
-        worker = create_ocr_inference_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="OCR progress",
-            finished_handler=self._on_ocr_inference_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_ocr_inference_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("ocr", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="OCR progress",
+                finished_handler=self._on_ocr_inference_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_ocr_inference_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("ocr", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.ocr_panel.set_actions_enabled(True)
+            self.show_error("OCR service unavailable", str(exc))
+            return
         self.ocr_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage(f"Running OCR with {ocr_config.provider_label}...")
-        self.thread_pool.start(worker)
 
     def _start_translation_initialization_task(
         self,
@@ -3886,23 +3959,25 @@ class MainWindow(QMainWindow):
             config=self.translation_panel.config(),
             force=force,
         )
-        worker = create_translation_initialization_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Translation initialization progress",
-            finished_handler=self._on_translation_init_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_translation_init_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("translation_init", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Translation initialization progress",
+                finished_handler=self._on_translation_init_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_translation_init_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("translation_init", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.translation_panel.set_actions_enabled(True)
+            self.show_error("Translation service unavailable", str(exc))
+            return
         self.translation_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Initializing translation...")
-        self.thread_pool.start(worker)
 
     def _start_translation_task(
         self,
@@ -3927,23 +4002,25 @@ class MainWindow(QMainWindow):
             force=force,
             selected_item_ids_by_page=selected_item_ids_by_page or {},
         )
-        worker = create_translation_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Translation progress",
-            finished_handler=self._on_translation_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_translation_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("translation", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Translation progress",
+                finished_handler=self._on_translation_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_translation_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("translation", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.translation_panel.set_actions_enabled(True)
+            self.show_error("Translation service unavailable", str(exc))
+            return
         self.translation_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage(f"Running translation with {translation_config.translator}...")
-        self.thread_pool.start(worker)
 
     def _start_inpaint_mask_task(
         self,
@@ -3954,20 +4031,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.current_project is None:
             self.show_error("No project open", "Create or open a project before preparing inpaint masks.")
-            return
-        if "inpaint" in self._busy_stages:
-            self.show_error("Inpaint is already running", "Wait for the current inpaint task to finish first.")
-            return
-        if not self._ensure_heavy_model_stage_available(
-            requested_stage="inpaint",
-            action_label="inpaint mask preparation",
-        ):
-            return
-        if self._active_workers or self._busy_stages:
-            self.show_error(
-                "Workflow already running",
-                "Wait for the current workflow task to finish before preparing inpaint masks.",
-            )
             return
         self._persist_panel_preferences()
 
@@ -3981,23 +4044,25 @@ class MainWindow(QMainWindow):
             mask_padding=int(settings["mask_padding"]),
             use_bubble_mask=bool(settings["use_bubble_mask"]),
         )
-        worker = create_inpaint_mask_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Inpaint mask preparation progress",
-            finished_handler=self._on_inpaint_mask_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_inpaint_mask_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("inpaint_mask", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Inpaint mask preparation progress",
+                finished_handler=self._on_inpaint_mask_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_inpaint_mask_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("inpaint_mask", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.inpaint_panel.set_actions_enabled(True)
+            self.show_error("Inpaint service unavailable", str(exc))
+            return
         self.inpaint_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Preparing inpaint masks...")
-        self.thread_pool.start(worker)
 
     def _start_inpaint_task(
         self,
@@ -4008,20 +4073,6 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.current_project is None:
             self.show_error("No project open", "Create or open a project before running inpaint.")
-            return
-        if "inpaint" in self._busy_stages:
-            self.show_error("Inpaint is already running", "Wait for the current inpaint task to finish first.")
-            return
-        if not self._ensure_heavy_model_stage_available(
-            requested_stage="inpaint",
-            action_label="Inpaint",
-        ):
-            return
-        if self._active_workers or self._busy_stages:
-            self.show_error(
-                "Workflow already running",
-                "Wait for the current workflow task to finish before starting inpaint.",
-            )
             return
         self._persist_panel_preferences()
 
@@ -4037,67 +4088,54 @@ class MainWindow(QMainWindow):
             use_crop_windows=bool(settings["use_crop_windows"]),
             device=settings["device"],
         )
-        worker = create_inpaint_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Inpaint progress",
-            finished_handler=self._on_inpaint_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_inpaint_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("inpaint", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Inpaint progress",
+                finished_handler=self._on_inpaint_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_inpaint_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("inpaint", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.inpaint_panel.set_actions_enabled(True)
+            self.show_error("Inpaint service unavailable", str(exc))
+            return
         self.inpaint_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Running inpaint...")
-        self.thread_pool.start(worker)
 
     def _start_lama_model_task(self, action: str) -> None:
-        if "inpaint" in self._busy_stages:
-            message = "Wait for the current inpaint task to finish before changing the LaMa model state."
-            self.statusBar().showMessage(message)
-            self.log(message, level="warning")
-            self.show_error("LaMa model busy", message)
-            return
-        if not self._ensure_heavy_model_stage_available(
-            requested_stage="inpaint",
-            action_label=f"LaMa model {action}",
-        ):
-            return
-        if self._active_workers or self._busy_stages:
-            self.show_error(
-                "Workflow already running",
-                "Wait for the current workflow task to finish before changing the LaMa model state.",
-            )
-            return
         task = LamaModelTask(
             name=f"LaMa model: {action}",
             stage="inpaint",
             action=action,
             device=self.inpaint_panel.device_value(),
         )
-        worker = create_lama_model_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label=None,
-            finished_handler=lambda result, active_worker: self._on_lama_model_worker_finished(
-                result,
-                active_worker,
-                action,
-            ),
-            failed_handler=lambda message, active_worker: self._on_lama_model_worker_failed(
-                message,
-                active_worker,
-                action,
-            ),
-        )
-        self._active_workers.append(worker)
+        try:
+            self._submit_service_task(
+                task,
+                progress_label=None,
+                finished_handler=lambda result, active_worker: self._on_lama_model_worker_finished(
+                    result,
+                    active_worker,
+                    action,
+                ),
+                failed_handler=lambda message, active_worker: self._on_lama_model_worker_failed(
+                    message,
+                    active_worker,
+                    action,
+                ),
+            )
+        except Exception as exc:
+            self.inpaint_panel.set_actions_enabled(True)
+            self.show_error("Inpaint service unavailable", str(exc))
+            return
         self.inpaint_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
-        self.thread_pool.start(worker)
 
     def _start_render_preparation_task(
         self,
@@ -4118,23 +4156,25 @@ class MainWindow(QMainWindow):
             image_relative_paths=image_relative_paths,
             force=force,
         )
-        worker = create_render_preparation_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Render preparation progress",
-            finished_handler=self._on_render_prep_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_render_prep_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("render_prepare", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Render preparation progress",
+                finished_handler=self._on_render_prep_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_render_prep_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("render_prepare", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.render_panel.set_actions_enabled(True)
+            self.show_error("Render service unavailable", str(exc))
+            return
         self.render_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Preparing render data...")
-        self.thread_pool.start(worker)
 
     def _start_render_task(
         self,
@@ -4162,23 +4202,25 @@ class MainWindow(QMainWindow):
             config=render_config.to_metadata(),
             force=render_config.force,
         )
-        worker = create_render_worker(task)
-        self._attach_worker_signals(
-            worker,
-            progress_label="Render progress",
-            finished_handler=self._on_render_worker_finished,
-            failed_handler=lambda message, active_worker: self._on_render_worker_failed(
-                message,
-                active_worker,
+        try:
+            self._submit_service_task(
                 task,
-            ),
-            event_handler=lambda payload: self._on_worker_event("render", payload, is_batch=len(image_relative_paths) > 1),
-        )
-        self._active_workers.append(worker)
+                progress_label="Render progress",
+                finished_handler=self._on_render_worker_finished,
+                failed_handler=lambda message, active_worker: self._on_render_worker_failed(
+                    message,
+                    active_worker,
+                    task,
+                ),
+                event_handler=lambda payload: self._on_worker_event("render", payload, is_batch=len(image_relative_paths) > 1),
+            )
+        except Exception as exc:
+            self.render_panel.set_actions_enabled(True)
+            self.show_error("Render service unavailable", str(exc))
+            return
         self.render_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Rendering translated pages...")
-        self.thread_pool.start(worker)
 
     def _start_llama_server_action(self, action: str, *, timeout_seconds: float) -> None:
         task = LlamaServerTask(
@@ -4210,7 +4252,7 @@ class MainWindow(QMainWindow):
 
     def _attach_worker_signals(
         self,
-        worker: TaskWorker,
+        worker: TaskWorker | ServiceCommandHandle,
         *,
         progress_label: str | None,
         finished_handler: Any,
@@ -4241,9 +4283,16 @@ class MainWindow(QMainWindow):
         if not normalized:
             return
         if busy:
+            updated_count = int(self._busy_stage_counts.get(normalized, 0) or 0) + 1
+            self._busy_stage_counts[normalized] = updated_count
             self._busy_stages.add(normalized)
         else:
-            self._busy_stages.discard(normalized)
+            updated_count = max(0, int(self._busy_stage_counts.get(normalized, 0) or 0) - 1)
+            if updated_count <= 0:
+                self._busy_stage_counts.pop(normalized, None)
+                self._busy_stages.discard(normalized)
+            else:
+                self._busy_stage_counts[normalized] = updated_count
         self.page_filmstrip.set_reorder_enabled(not bool(self._busy_stages))
         if hasattr(self, "workflow_tabs"):
             self._refresh_stage_statuses()
@@ -4373,7 +4422,7 @@ class MainWindow(QMainWindow):
         if previous_processing_page:
             self._invalidate_page_statuses([previous_processing_page])
 
-    def _finish_worker(self, worker: TaskWorker) -> None:
+    def _finish_worker(self, worker: TaskWorker | ServiceCommandHandle) -> None:
         self._release_worker(worker)
         self._mark_stage_busy(getattr(worker.task, "stage", ""), False)
         self.header.set_progress_value(None)
@@ -6252,7 +6301,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             return str(path)
 
-    def _release_worker(self, worker: TaskWorker) -> None:
+    def _release_worker(self, worker: TaskWorker | ServiceCommandHandle) -> None:
         if worker in self._active_workers:
             self._active_workers.remove(worker)
         if self._active_process_worker is worker:

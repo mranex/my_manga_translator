@@ -50,6 +50,10 @@ class AppHeader(QFrame):
         self.status_label.setProperty("role", "muted")
         status_layout.addWidget(self.status_label)
 
+        self.service_status_label = QLabel("Services: starting...")
+        self.service_status_label.setProperty("role", "muted")
+        status_layout.addWidget(self.service_status_label)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -71,6 +75,9 @@ class AppHeader(QFrame):
 
     def set_status_text(self, message: str) -> None:
         self.status_label.setText(str(message or "Ready"))
+
+    def set_service_status_text(self, message: str) -> None:
+        self.service_status_label.setText(str(message or "Services: -"))
 
     def set_progress_value(self, value: int | None) -> None:
         if value is None:
