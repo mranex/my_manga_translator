@@ -463,9 +463,8 @@ class PPDocLayoutV3Detector:
             self._model.eval()
         self.device = device
 
-    def _prepare_pil_image(self, image):
+    def _prepare_rgb_array(self, image):
         np_module = _require_numpy()
-        pil_module = importlib.import_module("PIL.Image")
         array = np_module.asarray(image)
 
         if array.size == 0:
@@ -475,30 +474,25 @@ class PPDocLayoutV3Detector:
             array = np_module.clip(array, 0, 255).astype(np_module.uint8)
 
         if array.ndim == 2:
-            gray = np_module.ascontiguousarray(array)
-            pil_image = pil_module.fromarray(gray, mode="L")
-            pil_image.load()
-            return pil_image
-
-        if array.ndim != 3:
+            rgb = np_module.stack([array, array, array], axis=-1)
+        elif array.ndim == 3:
+            channels = int(array.shape[2])
+            if channels == 3:
+                rgb = array[:, :, [2, 1, 0]]
+            elif channels == 4:
+                rgb = array[:, :, [2, 1, 0]]
+            else:
+                raise ValueError(f"Unsupported PPLayout channel count: {array.shape}")
+        else:
             raise ValueError(f"Unsupported PPLayout image shape: {array.shape}")
 
-        channels = int(array.shape[2])
-        if channels == 3:
-            rgb = array[:, :, [2, 1, 0]]
-            rgb = np_module.ascontiguousarray(rgb)
-            pil_image = pil_module.fromarray(rgb, mode="RGB")
-            pil_image.load()
-            return pil_image
+        rgb = np_module.ascontiguousarray(rgb)
+        if rgb.dtype != np_module.uint8:
+            rgb = rgb.astype(np_module.uint8, copy=False)
 
-        if channels == 4:
-            rgba = array[:, :, [2, 1, 0, 3]]
-            rgba = np_module.ascontiguousarray(rgba)
-            pil_image = pil_module.fromarray(rgba, mode="RGBA")
-            pil_image.load()
-            return pil_image
-
-        raise ValueError(f"Unsupported PPLayout image channel count: {array.shape}")
+        if rgb.ndim != 3 or int(rgb.shape[2]) != 3:
+            raise ValueError(f"PPLayout RGB preparation failed for shape: {rgb.shape}")
+        return rgb
 
     def detect_layout_regions(self, image) -> list[LayoutRegion]:
         np_module = _require_numpy()
@@ -506,32 +500,34 @@ class PPDocLayoutV3Detector:
             self.load()
 
         torch = importlib.import_module("torch")
-        pil_image = self._prepare_pil_image(image)
-        if pil_image.mode != "RGB":
-            pil_image = pil_image.convert("RGB")
-            pil_image.load()
+        rgb_image = self._prepare_rgb_array(image)
 
         _write_pp_layout_breadcrumb(
             "before PPLayout image_processor call",
-            image_shape=tuple(int(value) for value in np_module.asarray(image).shape),
-            image_dtype=str(np_module.asarray(image).dtype),
-            pil_mode=pil_image.mode,
+            image_shape=tuple(int(value) for value in rgb_image.shape),
+            image_dtype=str(rgb_image.dtype),
+            image_strides=tuple(int(value) for value in rgb_image.strides),
+            c_contiguous=bool(rgb_image.flags.c_contiguous),
+            input_type="numpy_rgb",
         )
 
-        inputs = self._image_processor(images=pil_image, return_tensors="pt")
-        _write_pp_layout_breadcrumb("after PPLayout image_processor call", pil_mode=pil_image.mode)
+        inputs = self._image_processor(images=rgb_image, return_tensors="pt")
+        _write_pp_layout_breadcrumb(
+            "after PPLayout image_processor call",
+            input_type="numpy_rgb",
+        )
         prepared_inputs = {
             key: value.to(self.device) if hasattr(value, "to") else value
             for key, value in inputs.items()
         }
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self._model(**prepared_inputs)
 
         processed_output = None
         post_process = getattr(self._image_processor, "post_process_object_detection", None)
         if callable(post_process):
-            target_sizes = torch.tensor([pil_image.size[::-1]])
+            target_sizes = torch.tensor([[int(rgb_image.shape[0]), int(rgb_image.shape[1])]])
             processed = post_process(
                 outputs,
                 threshold=self.confidence_threshold,
