@@ -1,0 +1,215 @@
+"""Resolve overlapping OCR workflow items before canon_state activation."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from copy import deepcopy
+from typing import Any
+
+from .ocr_items import bbox_area, clamp_bbox_to_image
+
+OVERLAP_COMPONENT_CONTAINMENT_THRESHOLD = 0.10
+
+
+def resolve_largest_overlap_components(
+    items: list[dict[str, Any]],
+    image_shape: Sequence[int],
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep the largest workflow item in each overlap component."""
+
+    resolved_items: list[dict[str, Any]] = [deepcopy(item) for item in items if isinstance(item, dict)]
+    indexed_boxes: dict[int, tuple[int, int, int, int]] = {}
+    indexed_ocr_areas: dict[int, int] = {}
+    candidate_indices: list[int] = []
+
+    for workflow_index, item in enumerate(resolved_items):
+        item["workflow_index"] = workflow_index
+        compare_box = _compare_box(item, image_shape)
+        if compare_box is None or _is_manual_item(item):
+            continue
+        indexed_boxes[workflow_index] = compare_box
+        indexed_ocr_areas[workflow_index] = _ocr_box_area(item, image_shape)
+        candidate_indices.append(workflow_index)
+
+    components = _connected_components(candidate_indices, indexed_boxes)
+    grouped_components = [component for component in components if len(component) > 1]
+    suppressed_count = 0
+
+    for component_index, component in enumerate(grouped_components, start=1):
+        overlap_group_id = f"overlap_{component_index:04d}"
+        winner_index = _winner_for_component(component, indexed_boxes, indexed_ocr_areas)
+        winner_item = resolved_items[winner_index]
+        winner_metadata = _ensure_metadata_dict(winner_item)
+        winner_item["suppressed"] = False
+        winner_item["excluded"] = False
+        winner_item["overlap_group_id"] = overlap_group_id
+        winner_metadata["suppressed"] = False
+        winner_metadata["overlap_group_id"] = overlap_group_id
+
+        for workflow_index in component:
+            item = resolved_items[workflow_index]
+            metadata = _ensure_metadata_dict(item)
+            item["overlap_group_id"] = overlap_group_id
+            metadata["overlap_group_id"] = overlap_group_id
+            if workflow_index == winner_index:
+                metadata.pop("suppression_reason", None)
+                metadata.pop("suppressed_by_workflow_index", None)
+                metadata.pop("suppressed_by", None)
+                item.pop("suppression_reason", None)
+                item.pop("suppressed_by_workflow_index", None)
+                item.pop("suppressed_by", None)
+                continue
+
+            item["suppressed"] = True
+            item["enabled"] = False
+            item["excluded"] = True
+            item["suppression_reason"] = "overlap_component_smaller_rect"
+            item["suppressed_by_workflow_index"] = winner_index
+            metadata["suppressed"] = True
+            metadata["suppression_reason"] = "overlap_component_smaller_rect"
+            metadata["suppressed_by_workflow_index"] = winner_index
+            suppressed_count += 1
+            if logger is not None:
+                logger(
+                    "[canon_overlap] Suppressed workflow item "
+                    f"{workflow_index} in {overlap_group_id} because winner {winner_index} has larger area."
+                )
+
+    if logger is not None:
+        logger(
+            "[canon_overlap] Resolved "
+            f"{len(grouped_components)} overlap components across {len(candidate_indices)} workflow items; "
+            f"suppressed {suppressed_count} smaller items."
+        )
+
+    return resolved_items
+
+
+def _compare_box(item: dict[str, Any], image_shape: Sequence[int]) -> tuple[int, int, int, int] | None:
+    ocr_bbox = clamp_bbox_to_image(item.get("ocr_bbox"), image_shape)
+    if ocr_bbox is not None:
+        return ocr_bbox
+    return clamp_bbox_to_image(item.get("bbox"), image_shape)
+
+
+def _ocr_box_area(item: dict[str, Any], image_shape: Sequence[int]) -> int:
+    return _bbox_area(clamp_bbox_to_image(item.get("ocr_bbox"), image_shape))
+
+
+def _bbox_area(box: tuple[int, int, int, int] | None) -> int:
+    return max(1, bbox_area(box))
+
+
+def _intersection_area(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
+    overlap_x = min(int(a[2]), int(b[2])) - max(int(a[0]), int(b[0]))
+    overlap_y = min(int(a[3]), int(b[3])) - max(int(a[1]), int(b[1]))
+    if overlap_x <= 0 or overlap_y <= 0:
+        return 0
+    return overlap_x * overlap_y
+
+
+def _center_inside(
+    smaller: tuple[int, int, int, int],
+    larger: tuple[int, int, int, int],
+) -> bool:
+    center_x = (float(smaller[0]) + float(smaller[2])) / 2.0
+    center_y = (float(smaller[1]) + float(smaller[3])) / 2.0
+    return (
+        float(larger[0]) <= center_x <= float(larger[2])
+        and float(larger[1]) <= center_y <= float(larger[3])
+    )
+
+
+def _should_connect(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    intersection_area = _intersection_area(a, b)
+    if intersection_area > 0:
+        containment_ratio = intersection_area / float(min(_bbox_area(a), _bbox_area(b)))
+        if containment_ratio >= OVERLAP_COMPONENT_CONTAINMENT_THRESHOLD:
+            return True
+
+    if _bbox_area(a) <= _bbox_area(b):
+        return _center_inside(a, b)
+    return _center_inside(b, a)
+
+
+def _connected_components(
+    candidate_indices: Sequence[int],
+    indexed_boxes: dict[int, tuple[int, int, int, int]],
+) -> list[list[int]]:
+    adjacency: dict[int, set[int]] = {index: set() for index in candidate_indices}
+    for left_offset, left_index in enumerate(candidate_indices):
+        left_box = indexed_boxes[left_index]
+        for right_index in candidate_indices[left_offset + 1 :]:
+            right_box = indexed_boxes[right_index]
+            if not _should_connect(left_box, right_box):
+                continue
+            adjacency[left_index].add(right_index)
+            adjacency[right_index].add(left_index)
+
+    components: list[list[int]] = []
+    seen: set[int] = set()
+    for start_index in candidate_indices:
+        if start_index in seen:
+            continue
+        stack = [start_index]
+        component: list[int] = []
+        seen.add(start_index)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency.get(current, ()):
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                stack.append(neighbor)
+        components.append(sorted(component))
+    return components
+
+
+def _winner_for_component(
+    component: Sequence[int],
+    indexed_boxes: dict[int, tuple[int, int, int, int]],
+    indexed_ocr_areas: dict[int, int],
+) -> int:
+    return sorted(
+        component,
+        key=lambda workflow_index: (
+            -_bbox_area(indexed_boxes[workflow_index]),
+            -indexed_ocr_areas.get(workflow_index, 0),
+            workflow_index,
+        ),
+    )[0]
+
+
+def _is_manual_item(item: dict[str, Any]) -> bool:
+    if bool(item.get("manual", False)):
+        return True
+    if bool(item.get("bbox_user_edited", False)) or bool(item.get("ocr_bbox_user_edited", False)):
+        return True
+    if bool(item.get("render_bbox_user_edited", False)):
+        return True
+    if str(item.get("source", "") or "").strip().lower() == "manual":
+        return True
+    metadata = item.get("metadata", {})
+    if isinstance(metadata, dict):
+        if bool(metadata.get("manual", False)):
+            return True
+        if bool(metadata.get("user_edited", False)) or bool(metadata.get("user_edited_bbox", False)):
+            return True
+    return False
+
+
+def _ensure_metadata_dict(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    item["metadata"] = dict(metadata)
+    return item["metadata"]
+
+
+__all__ = [
+    "OVERLAP_COMPONENT_CONTAINMENT_THRESHOLD",
+    "resolve_largest_overlap_components",
+]

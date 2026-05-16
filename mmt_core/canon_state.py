@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+from .canon_overlap import resolve_largest_overlap_components
 from .image_io import ensure_path
 from .ocr_items import (
     bbox_to_list,
@@ -237,6 +238,7 @@ def build_canon_state_from_detection(
     ]
 
     active_items = build_ocr_items_from_detection(active_detection, resolved_shape, logger=logger)
+    active_items = resolve_largest_overlap_components(active_items, resolved_shape, logger=logger)
     canon_items: list[dict[str, Any]] = []
     used_text_region_ids: set[int] = set()
     used_layout_region_ids: set[int] = set()
@@ -244,18 +246,18 @@ def build_canon_state_from_detection(
 
     for workflow_item in active_items:
         canon_item = _build_active_canon_item(
-                workflow_item,
-                canon_index=next_index,
-                image_width=image_width,
-                image_height=image_height,
-                bubbles=bubbles,
-                text_regions=text_regions,
-                layout_regions=layout_regions,
-                used_text_region_ids=used_text_region_ids,
-                used_layout_region_ids=used_layout_region_ids,
-                page_name=page_name,
-                logger=logger,
-            )
+            workflow_item,
+            canon_index=next_index,
+            image_width=image_width,
+            image_height=image_height,
+            bubbles=bubbles,
+            text_regions=text_regions,
+            layout_regions=layout_regions,
+            used_text_region_ids=used_text_region_ids,
+            used_layout_region_ids=used_layout_region_ids,
+            page_name=page_name,
+            logger=logger,
+        )
         if canon_item is not None:
             canon_items.append(canon_item)
             next_index += 1
@@ -315,6 +317,8 @@ def build_canon_state_from_detection(
         if disabled_item is not None:
             canon_items.append(disabled_item)
             next_index += 1
+
+    _attach_suppressed_by_canon_ids(canon_items)
 
     if logger is not None and not canon_items:
         logger(f"[canon_state] Created an empty canon_state for {page_name}. OCR will have no items for this page.")
@@ -878,6 +882,11 @@ def _normalize_canon_item(
         normalized.get("source_direction", "") or infer_source_direction(normalized["ocr_bbox"])
     )
     normalized["reading_order"] = _coerce_optional_int(normalized.get("reading_order"))
+    normalized["suppressed"] = bool(normalized.get("suppressed", False))
+    normalized["suppression_reason"] = str(normalized.get("suppression_reason", "") or "")
+    normalized["suppressed_by_workflow_index"] = _coerce_optional_int(normalized.get("suppressed_by_workflow_index"))
+    normalized["suppressed_by"] = str(normalized.get("suppressed_by", "") or "")
+    normalized["overlap_group_id"] = str(normalized.get("overlap_group_id", "") or "")
 
     detector_refs = normalized.get("detector_refs", {})
     if not isinstance(detector_refs, dict):
@@ -889,6 +898,16 @@ def _normalize_canon_item(
     }
     metadata = normalized.get("metadata", {})
     normalized["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+    if normalized["suppressed"]:
+        normalized["metadata"]["suppressed"] = True
+    if normalized["suppression_reason"]:
+        normalized["metadata"]["suppression_reason"] = normalized["suppression_reason"]
+    if normalized["suppressed_by_workflow_index"] is not None:
+        normalized["metadata"]["suppressed_by_workflow_index"] = normalized["suppressed_by_workflow_index"]
+    if normalized["suppressed_by"]:
+        normalized["metadata"]["suppressed_by"] = normalized["suppressed_by"]
+    if normalized["overlap_group_id"]:
+        normalized["metadata"]["overlap_group_id"] = normalized["overlap_group_id"]
     return normalized
 
 
@@ -907,6 +926,11 @@ def _build_active_canon_item(
     logger: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
     kind = normalize_canon_kind(workflow_item.get("kind"))
+    suppressed = bool(workflow_item.get("suppressed", False))
+    suppression_reason = str(workflow_item.get("suppression_reason", "") or "")
+    suppressed_by_workflow_index = _coerce_optional_int(workflow_item.get("suppressed_by_workflow_index"))
+    overlap_group_id = str(workflow_item.get("overlap_group_id", "") or "")
+    workflow_index = _coerce_optional_int(workflow_item.get("workflow_index"))
     bbox = _sanitize_bbox(
         workflow_item.get("bbox"),
         image_width=image_width,
@@ -962,7 +986,8 @@ def _build_active_canon_item(
             if bubble_id is not None and _coerce_optional_int(region.get("bubble_id")) == bubble_id
         ]
         detector_refs["text_region_ids"] = _ids_from_regions(matched_text_regions)
-        used_text_region_ids.update(detector_refs["text_region_ids"])
+        if not suppressed:
+            used_text_region_ids.update(detector_refs["text_region_ids"])
         manual = bool((matched_bubble or {}).get("manual", False)) or any(
             bool(region.get("manual", False)) for region in matched_text_regions
         )
@@ -988,7 +1013,8 @@ def _build_active_canon_item(
         )
         if matched_text_region is not None:
             detector_refs["text_region_ids"] = _ids_from_regions([matched_text_region])
-            used_text_region_ids.update(detector_refs["text_region_ids"])
+            if not suppressed:
+                used_text_region_ids.update(detector_refs["text_region_ids"])
             manual = bool(matched_text_region.get("manual", False))
             source = "manual" if manual else "detector"
             metadata = _metadata_from_detection_region(
@@ -1005,7 +1031,8 @@ def _build_active_canon_item(
         )
         if matched_layout_region is not None:
             detector_refs["layout_region_ids"] = _ids_from_regions([matched_layout_region])
-            used_layout_region_ids.update(detector_refs["layout_region_ids"])
+            if not suppressed:
+                used_layout_region_ids.update(detector_refs["layout_region_ids"])
             manual = bool(matched_layout_region.get("manual", False))
             source = "manual" if manual else "detector"
             metadata = _metadata_from_detection_region(
@@ -1019,13 +1046,23 @@ def _build_active_canon_item(
     detector_sources = workflow_item.get("detector_sources", [])
     if isinstance(detector_sources, list) and detector_sources:
         metadata.setdefault("detector_sources", [str(value) for value in detector_sources if str(value).strip()])
+    if workflow_index is not None:
+        metadata["workflow_index"] = workflow_index
+    if overlap_group_id:
+        metadata["overlap_group_id"] = overlap_group_id
+    if suppressed:
+        metadata["suppressed"] = True
+        metadata["suppression_reason"] = suppression_reason
+        if suppressed_by_workflow_index is not None:
+            metadata["suppressed_by_workflow_index"] = suppressed_by_workflow_index
 
     try:
         return _normalize_canon_item(
             {
                 "canon_id": f"{_CANON_ID_PREFIX}{canon_index:04d}",
                 "kind": kind,
-                "enabled": True,
+                "enabled": not suppressed,
+                "excluded": suppressed,
                 "manual": manual,
                 "source": source,
                 "bbox": bbox,
@@ -1039,6 +1076,10 @@ def _build_active_canon_item(
                 "reading_order": _coerce_optional_int(workflow_item.get("reading_order")),
                 "detector_refs": detector_refs,
                 "metadata": metadata,
+                "suppressed": suppressed,
+                "suppression_reason": suppression_reason,
+                "suppressed_by_workflow_index": suppressed_by_workflow_index,
+                "overlap_group_id": overlap_group_id,
             },
             item_index=canon_index,
             image_width=image_width,
@@ -1058,6 +1099,39 @@ def _build_active_canon_item(
             item_id=f"{_CANON_ID_PREFIX}{canon_index:04d}",
         )
         return None
+
+
+def _attach_suppressed_by_canon_ids(canon_items: list[dict[str, Any]]) -> None:
+    workflow_index_to_canon_id: dict[int, str] = {}
+    for item in canon_items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata", {})
+        if not isinstance(metadata, dict):
+            continue
+        workflow_index = _coerce_optional_int(metadata.get("workflow_index"))
+        canon_id = str(item.get("canon_id", "") or "").strip()
+        if workflow_index is None or not canon_id:
+            continue
+        workflow_index_to_canon_id[workflow_index] = canon_id
+
+    for item in canon_items:
+        if not isinstance(item, dict) or not bool(item.get("suppressed", False)):
+            continue
+        metadata = item.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            item["metadata"] = metadata
+        winner_index = _coerce_optional_int(
+            item.get("suppressed_by_workflow_index", metadata.get("suppressed_by_workflow_index"))
+        )
+        if winner_index is None:
+            continue
+        winner_canon_id = workflow_index_to_canon_id.get(winner_index, "")
+        item["suppressed_by_workflow_index"] = winner_index
+        metadata["suppressed_by_workflow_index"] = winner_index
+        item["suppressed_by"] = winner_canon_id
+        metadata["suppressed_by"] = winner_canon_id
 
 
 def _build_disabled_canon_item_from_bubble(
