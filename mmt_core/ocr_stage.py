@@ -31,6 +31,7 @@ from .ocr_io import (
 from .ocr_items import build_ocr_items_from_canon_state, crop_image_to_bbox
 from .paddleocr_vl_client import PaddleOCRVLClientError
 from .ocr_providers import OCRProvider, OCRProviderError, create_ocr_provider
+from .ocr_text_filter import filter_ocr_text_for_pipeline
 
 
 ProgressCallback = Callable[[int, int, dict[str, Any]], None]
@@ -304,6 +305,9 @@ def run_ocr_for_page(
 
             item["status"] = "running"
             item["error"] = ""
+            item["skip_reason"] = ""
+            item["ocr_rejection_reason"] = ""
+            item["raw_ocr_text"] = ""
             item["updated_at"] = _timestamp()
             item["needs_ocr"] = False
             _apply_provider_metadata(item, provider)
@@ -322,28 +326,53 @@ def run_ocr_for_page(
             except TimeoutError:
                 item["status"] = "error"
                 item["error"] = _timeout_message(provider, item_id)
+                item["skip_reason"] = ""
+                item["ocr_rejection_reason"] = ""
+                item["raw_ocr_text"] = ""
                 item["updated_at"] = _timestamp()
                 item["needs_ocr"] = True
                 _log(logger, f"OCR item {item_id} failed: {item['error']}")
             except (OCRProviderError, PaddleOCRVLClientError, DeepSeekOCRClientError, FileNotFoundError) as exc:
                 item["status"] = "error"
                 item["error"] = str(exc)
+                item["skip_reason"] = ""
+                item["ocr_rejection_reason"] = ""
+                item["raw_ocr_text"] = ""
                 item["updated_at"] = _timestamp()
                 item["needs_ocr"] = True
                 _log(logger, f"OCR item {item_id} failed: {exc}")
             except Exception as exc:
                 item["status"] = "error"
                 item["error"] = str(exc)
+                item["skip_reason"] = ""
+                item["ocr_rejection_reason"] = ""
+                item["raw_ocr_text"] = ""
                 item["updated_at"] = _timestamp()
                 item["needs_ocr"] = True
                 _log(logger, f"OCR item {item_id} failed with an unexpected error: {exc}")
             else:
-                item["text"] = recognized_text
-                item["status"] = "done"
+                filter_result = filter_ocr_text_for_pipeline(
+                    recognized_text,
+                    provider_key=str(getattr(provider, "provider_key", "") or ""),
+                )
                 item["error"] = ""
                 item["updated_at"] = _timestamp()
                 item["needs_ocr"] = False
-                _log(logger, f"OCR item {item_id} complete.")
+                if filter_result.rejected:
+                    item["raw_ocr_text"] = str(recognized_text or "")
+                    item["text"] = ""
+                    item["status"] = "skipped"
+                    item["skip_reason"] = filter_result.reason
+                    item["ocr_rejection_reason"] = filter_result.reason
+                    _log(logger, f"OCR item {item_id} skipped: {filter_result.reason}")
+                else:
+                    filtered_text = filter_result.text
+                    item["raw_ocr_text"] = str(recognized_text or "") if filtered_text != str(recognized_text or "") else ""
+                    item["text"] = filtered_text
+                    item["status"] = "done"
+                    item["skip_reason"] = ""
+                    item["ocr_rejection_reason"] = ""
+                    _log(logger, f"OCR item {item_id} complete.")
 
             _apply_provider_metadata(item, provider)
             _save_ocr_progress(payload, ocr_path)
@@ -366,8 +395,11 @@ def run_ocr_for_page(
 def _item_progress_message(item_id: int, item: dict[str, Any]) -> str:
     status = str(item.get("status", "") or "prepared")
     error = str(item.get("error", "") or "").strip()
+    rejection_reason = str(item.get("ocr_rejection_reason", "") or "").strip()
     if error:
         return f"OCR item {item_id}: {status} ({error})"
+    if status == "skipped" and rejection_reason:
+        return f"OCR item {item_id}: skipped ({rejection_reason})"
     return f"OCR item {item_id}: {status}"
 
 
