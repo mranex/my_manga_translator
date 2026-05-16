@@ -370,6 +370,7 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self._content_splitter, 1)
 
         self.page_filmstrip = PageFilmstripWidget()
+        self.page_filmstrip.setMinimumHeight(260)
         self.page_filmstrip.page_selected.connect(self._on_page_selected)
         self.page_filmstrip.page_order_changed.connect(self._on_page_order_changed)
         self.page_filmstrip.thumbnail_load_failed.connect(lambda message: self.log(message, level="warning"))

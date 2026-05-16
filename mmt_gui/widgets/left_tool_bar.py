@@ -5,7 +5,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QSizePolicy, QStyle, QToolButton, QVBoxLayout, QWidget
+
+def get_colorized_icon(style: QStyle, icon_enum: QStyle.StandardPixmap, color_hex: str = "#e5e7eb") -> QIcon:
+    icon = style.standardIcon(icon_enum)
+    pixmap = icon.pixmap(24, 24)
+    if pixmap.isNull():
+        return icon
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), QColor(color_hex))
+    painter.end()
+    return QIcon(pixmap)
 
 MODE_LABELS = {
     "Source": "Src",
@@ -35,8 +47,8 @@ class LeftToolBar(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("LeftToolBar")
-        self.setMinimumWidth(84)
-        self.setMaximumWidth(112)
+        self.setMinimumWidth(100)
+        self.setMaximumWidth(130)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         layout = QVBoxLayout(self)
@@ -48,28 +60,32 @@ class LeftToolBar(QFrame):
         layout.addWidget(title_label)
 
         self.first_page_button = self._build_button(
-            "|<",
+            "",
             "Jump to the first page.",
             self.first_page_requested.emit,
             icon_kind=QStyle.StandardPixmap.SP_MediaSkipBackward,
+            icon_only=True,
         )
         self.previous_page_button = self._build_button(
-            "<",
+            "",
             "Go to the previous page.",
             self.previous_page_requested.emit,
             icon_kind=QStyle.StandardPixmap.SP_MediaSeekBackward,
+            icon_only=True,
         )
         self.next_page_button = self._build_button(
-            ">",
+            "",
             "Go to the next page.",
             self.next_page_requested.emit,
             icon_kind=QStyle.StandardPixmap.SP_MediaSeekForward,
+            icon_only=True,
         )
         self.last_page_button = self._build_button(
-            ">|",
+            "",
             "Jump to the last page.",
             self.last_page_requested.emit,
             icon_kind=QStyle.StandardPixmap.SP_MediaSkipForward,
+            icon_only=True,
         )
 
         for button in (
@@ -139,6 +155,7 @@ class LeftToolBar(QFrame):
         *,
         checkable: bool = False,
         icon_kind: QStyle.StandardPixmap | None = None,
+        icon_only: bool = False,
     ) -> QToolButton:
         button = QToolButton(self)
         button.setText(text)
@@ -148,9 +165,14 @@ class LeftToolBar(QFrame):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setMinimumHeight(30)
         button.setMaximumHeight(34)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if icon_kind is not None:
-            button.setIcon(self.style().standardIcon(icon_kind))
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            colorized = get_colorized_icon(self.style(), icon_kind)
+            button.setIcon(colorized)
+            if icon_only:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            else:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         else:
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.clicked.connect(lambda _checked=False: callback())

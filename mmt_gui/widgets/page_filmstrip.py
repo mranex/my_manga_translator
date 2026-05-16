@@ -36,8 +36,8 @@ from .stage_status import normalize_stage_status, status_gradient_colors
 PAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 PIXMAP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
-THUMBNAIL_SIZE = QSize(96, 118)
-ITEM_SIZE = QSize(124, 156)
+THUMBNAIL_SIZE = QSize(144, 177)
+ITEM_SIZE = QSize(176, 224)
 THUMBNAIL_BATCH_SIZE = 10
 
 
@@ -65,15 +65,15 @@ class _FilmstripDelegate(QStyledItemDelegate):
 
         shadow_rect = QRectF(rect.adjusted(4, 7, -4, 0))
         shadow_path = QPainterPath()
-        shadow_path.addRoundedRect(shadow_rect, 18, 18)
-        shadow_color = QColor(8, 15, 30, 120 if is_selected else (74 if is_hovered else 42))
+        shadow_path.addRect(shadow_rect)
+        shadow_color = QColor(0, 0, 0, 150 if is_selected else (100 if is_hovered else 60))
         if not is_dark:
             shadow_color = QColor(51, 65, 85, 28 if is_selected else (20 if is_hovered else 12))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(shadow_color)
         painter.drawPath(shadow_path)
 
-        border_color = QColor("#7dd3fc" if is_selected else ("#475569" if is_dark else "#d8e0eb"))
+        border_color = QColor("#9d4edd" if is_selected else ("#2c2c36" if is_dark else "#d8e0eb"))
         if not is_dark and is_selected:
             border_color = QColor("#3b82f6")
 
@@ -84,16 +84,16 @@ class _FilmstripDelegate(QStyledItemDelegate):
             float(rect.bottom()),
         )
         if is_dark:
-            frame_gradient.setColorAt(0.0, QColor("#182338" if is_selected else "#111827"))
-            frame_gradient.setColorAt(0.55, QColor("#101a2c" if is_selected else "#0f172a"))
-            frame_gradient.setColorAt(1.0, QColor("#0b1220"))
+            frame_gradient.setColorAt(0.0, QColor("#1f1f2e" if is_selected else "#111116"))
+            frame_gradient.setColorAt(0.55, QColor("#181824" if is_selected else "#0a0a0c"))
+            frame_gradient.setColorAt(1.0, QColor("#050508"))
         else:
             frame_gradient.setColorAt(0.0, QColor("#ffffff"))
             frame_gradient.setColorAt(0.55, QColor("#f7fbff" if is_selected else "#f8fbff"))
             frame_gradient.setColorAt(1.0, QColor("#edf4ff" if is_selected else "#f4f8ff"))
 
         card_path = QPainterPath()
-        card_path.addRoundedRect(QRectF(rect), 16, 16)
+        card_path.addRect(QRectF(rect))
         painter.setPen(QPen(border_color, 2 if is_selected else 1))
         painter.setBrush(frame_gradient)
         painter.drawPath(card_path)
@@ -101,8 +101,8 @@ class _FilmstripDelegate(QStyledItemDelegate):
         if is_selected:
             inner_rect = QRectF(rect.adjusted(3, 3, -3, -3))
             inner_path = QPainterPath()
-            inner_path.addRoundedRect(inner_rect, 13, 13)
-            glow_color = QColor("#67e8f9" if is_dark else "#93c5fd")
+            inner_path.addRect(inner_rect)
+            glow_color = QColor("#9d4edd" if is_dark else "#93c5fd")
             glow_color.setAlpha(60 if is_dark else 48)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(glow_color, 1))
@@ -112,11 +112,11 @@ class _FilmstripDelegate(QStyledItemDelegate):
             rect.left() + 10,
             rect.top() + 10,
             rect.width() - 20,
-            THUMBNAIL_SIZE.height(),
+            rect.height() - 36,
         )
         thumb_path = QPainterPath()
-        thumb_path.addRoundedRect(QRectF(thumb_rect), 12, 12)
-        thumb_fill = QColor("#020617") if is_dark else QColor("#f8fafc")
+        thumb_path.addRect(QRectF(thumb_rect))
+        thumb_fill = QColor("#050508") if is_dark else QColor("#f8fafc")
         painter.setPen(QPen(QColor(255, 255, 255, 20) if is_dark else QColor(15, 23, 42, 18), 1))
         painter.setBrush(thumb_fill)
         painter.drawPath(thumb_path)
@@ -140,7 +140,7 @@ class _FilmstripDelegate(QStyledItemDelegate):
 
         badge_rect = QRect(thumb_rect.left() + 8, thumb_rect.top() + 8, 26, 20)
         badge_path = QPainterPath()
-        badge_path.addRoundedRect(QRectF(badge_rect), 10, 10)
+        badge_path.addRect(QRectF(badge_rect))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(15, 23, 42, 200) if is_dark else QColor(255, 255, 255, 224))
         painter.drawPath(badge_path)
@@ -160,12 +160,12 @@ class _FilmstripDelegate(QStyledItemDelegate):
         gradient.setColorAt(0.0, QColor(start_color))
         gradient.setColorAt(1.0, QColor(end_color))
         track_path = QPainterPath()
-        track_path.addRoundedRect(QRectF(line_rect), 3, 3)
+        track_path.addRect(QRectF(line_rect))
         painter.setBrush(QColor(255, 255, 255, 22) if is_dark else QColor(15, 23, 42, 12))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(track_path)
         line_path = QPainterPath()
-        line_path.addRoundedRect(QRectF(line_rect), 3, 3)
+        line_path.addRect(QRectF(line_rect))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(gradient)
         painter.drawPath(line_path)
@@ -238,8 +238,8 @@ class PageFilmstripWidget(QFrame):
         self._thumbnail_timer.timeout.connect(self._load_thumbnail_batch)
         self._reorder_enabled = True
 
-        self.setMinimumHeight(170)
-        self.setMaximumHeight(220)
+        self.setMinimumHeight(240)
+        self.setMaximumHeight(300)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -535,8 +535,8 @@ class PageFilmstripWidget(QFrame):
             float(rect.bottom()),
         )
         if self.palette().window().color().lightness() < 128:
-            gradient.setColorAt(0.0, QColor("#1e293b"))
-            gradient.setColorAt(1.0, QColor("#334155"))
+            gradient.setColorAt(0.0, QColor("#111116"))
+            gradient.setColorAt(1.0, QColor("#0a0a0c"))
             text_color = QColor("#e2e8f0")
             outline = QColor(255, 255, 255, 40)
         else:
@@ -545,7 +545,7 @@ class PageFilmstripWidget(QFrame):
             text_color = QColor("#334155")
             outline = QColor(15, 23, 42, 40)
         path = QPainterPath()
-        path.addRoundedRect(QRectF(rect), 10, 10)
+        path.addRect(QRectF(rect))
         painter.setPen(QPen(outline, 1))
         painter.setBrush(gradient)
         painter.drawPath(path)

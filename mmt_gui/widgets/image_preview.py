@@ -59,7 +59,7 @@ class ImagePreviewWidget(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        self.setBackgroundBrush(self.palette().brush(self.backgroundRole()))
+        self.setBackgroundBrush(QBrush(QColor("#0a0a0c")))
         self._auto_fit_enabled = True
 
     def clear_image(self) -> None:

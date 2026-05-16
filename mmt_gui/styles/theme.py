@@ -27,17 +27,17 @@ LOGGER = logging.getLogger(__name__)
 
 THEME_COLORS: dict[str, dict[str, str]] = {
     "Dark": {
-        "window": "#0f172a",
-        "panel": "#111827",
-        "elevated": "#1e293b",
-        "base": "#111827",
-        "alternate_base": "#172033",
-        "text": "#e5e7eb",
-        "muted": "#94a3b8",
-        "border": "#334155",
-        "highlight": "#243b63",
-        "highlight_text": "#ffffff",
-        "button": "#1f2937",
+        "window": "#0a0a0c",         # Deep Metallic Black
+        "panel": "#111116",          # Dark panel background
+        "elevated": "#181820",       # Elevated surfaces
+        "base": "#111116",           # Input backgrounds
+        "alternate_base": "#181820", # Alternate list/table rows
+        "text": "#e5e7eb",           # Off-white text
+        "muted": "#8a8a9e",          # Muted gray text
+        "border": "#2c2c36",         # Subtle borders
+        "highlight": "#9d4edd",      # Neon Purple highlight
+        "highlight_text": "#ffffff", # Text on highlight
+        "button": "#181820",         # Button base
         "button_text": "#e5e7eb",
     },
     "Light": {
