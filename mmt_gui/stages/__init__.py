@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .config_panel import ConfigPanel
 from .detection_panel import DetectionPanel
 from .export_panel import ExportPanel
 from .inpaint_panel import InpaintPanel
@@ -13,6 +14,7 @@ from .translation_panel import TranslationPanel
 
 __all__ = [
     "DetectionPanel",
+    "ConfigPanel",
     "ExportPanel",
     "InpaintPanel",
     "OCRPanel",

@@ -35,7 +35,7 @@ from mmt_core import (
     summarize_ocr_items,
     update_ocr_item_text,
 )
-from mmt_gui.widgets import CollapsibleSection, CropPreviewPanel, TextItemEditorWidget
+from mmt_gui.widgets import CollapsibleSection, CropPreviewPanel, StaticSection, TextItemEditorWidget
 from mmt_gui.widgets.settings_card import style_button
 
 from .base_panel import StagePanel
@@ -176,7 +176,8 @@ class OCRPanel(StagePanel):
         self.server_section.content_layout.addWidget(self.server_settings_section)
         self.content_layout.addWidget(self.server_section)
 
-        actions_card = CollapsibleSection("OCR Actions", expanded=True)
+        actions_card = StaticSection("OCR Action", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
@@ -281,6 +282,7 @@ class OCRPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         details_card = CollapsibleSection("OCR Summary", expanded=True)
+        self.summary_section = details_card
         details_form = QFormLayout()
         details_form.setContentsMargins(0, 0, 0, 0)
         details_form.setSpacing(8)
@@ -301,7 +303,8 @@ class OCRPanel(StagePanel):
         details_card.content_layout.addLayout(details_form)
         self.content_layout.addWidget(details_card)
 
-        items_card = CollapsibleSection("OCR Items", expanded=True)
+        items_card = StaticSection("OCR Items", expanded=True)
+        self.items_section = items_card
         self.items_table = QTableWidget(0, 7)
         self.items_table.setProperty("stageTable", True)
         self.items_table.setHorizontalHeaderLabels(["id", "kind", "bbox", "ocr_bbox", "status", "provider", "text"])
@@ -414,7 +417,7 @@ class OCRPanel(StagePanel):
         self.box_editor_section.content_layout.addLayout(selected_box_form)
         self.content_layout.addWidget(self.box_editor_section)
 
-        self.editor_section = CollapsibleSection("OCR Item Editor", expanded=False)
+        self.editor_section = StaticSection("OCR Item Editor", expanded=True)
         editor_info_layout = QVBoxLayout()
         editor_info_layout.setContentsMargins(0, 0, 0, 0)
         editor_info_layout.setSpacing(6)
@@ -474,6 +477,13 @@ class OCRPanel(StagePanel):
         self.content_layout.addWidget(self.editor_section)
 
         self._set_editor_enabled(False)
+
+    def config_sections(self) -> list[QWidget]:
+        return [self.provider_section, self.chrome_lens_section, self.server_section]
+
+    def simplify_for_config_stage(self) -> None:
+        self.detach_widget(self.summary_section)
+        self.detach_widget(self.box_editor_section)
         self._update_provider_sections()
         self._update_box_editor_state()
 
@@ -574,6 +584,7 @@ class OCRPanel(StagePanel):
         self.error_items_value.setText("0")
         self.needs_ocr_items_value.setText("0")
         self.cache_path_value.setText("-")
+        self.items_section.set_badge_text("0 items")
         self.box_editor_section.set_expanded(False)
         self.editor_section.set_expanded(False)
         self.set_selected_box(None)
@@ -915,6 +926,9 @@ class OCRPanel(StagePanel):
         summary = summarize_ocr_items(self._all_items)
         edit_summary = summarize_ocr_edit_state({"items": self._all_items})
         self.total_items_value.setText(
+            f"{summary.get('total', 0)} active / {summary.get('excluded', 0)} excluded"
+        )
+        self.items_section.set_badge_text(
             f"{summary.get('total', 0)} active / {summary.get('excluded', 0)} excluded"
         )
         self.prepared_items_value.setText(str(summary.get("prepared", 0)))

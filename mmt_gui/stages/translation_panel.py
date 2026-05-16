@@ -47,7 +47,7 @@ from mmt_core import (
     update_translation_item_source_text,
     update_translation_item_translated_text,
 )
-from mmt_gui.widgets import CollapsibleSection, CropPreviewPanel, TextItemEditorWidget
+from mmt_gui.widgets import CollapsibleSection, CropPreviewPanel, StaticSection, TextItemEditorWidget
 from mmt_gui.widgets.settings_card import style_button
 
 from .base_panel import StagePanel
@@ -88,6 +88,7 @@ class TranslationPanel(StagePanel):
         self._ui_refresh_guard = False
 
         settings_card = CollapsibleSection("Translation Settings", expanded=False)
+        self.settings_section = settings_card
         settings_form = QFormLayout()
         settings_form.setContentsMargins(0, 0, 0, 0)
         settings_form.setSpacing(8)
@@ -152,6 +153,7 @@ class TranslationPanel(StagePanel):
         self.content_layout.addWidget(settings_card)
 
         prompt_card = CollapsibleSection("Prompt Studio", expanded=True)
+        self.prompt_section = prompt_card
         prompt_form = QFormLayout()
         prompt_form.setContentsMargins(0, 0, 0, 0)
         prompt_form.setSpacing(8)
@@ -233,6 +235,7 @@ class TranslationPanel(StagePanel):
         self.content_layout.addWidget(prompt_card)
 
         provider_card = CollapsibleSection("Provider Credentials & Advanced", expanded=False)
+        self.provider_section = provider_card
         self.provider_hint_label = QLabel("")
         self.provider_hint_label.setWordWrap(True)
         self.provider_hint_label.setProperty("role", "muted")
@@ -291,7 +294,8 @@ class TranslationPanel(StagePanel):
         self._update_prompt_mode_visibility()
         self._refresh_prompt_preview()
 
-        actions_card = CollapsibleSection("Translation Actions", expanded=True)
+        actions_card = StaticSection("Translation Action", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
@@ -396,6 +400,7 @@ class TranslationPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         details_card = CollapsibleSection("Translation Summary", expanded=True)
+        self.summary_section = details_card
         details_form = QFormLayout()
         details_form.setContentsMargins(0, 0, 0, 0)
         details_form.setSpacing(8)
@@ -414,7 +419,8 @@ class TranslationPanel(StagePanel):
         details_card.content_layout.addLayout(details_form)
         self.content_layout.addWidget(details_card)
 
-        items_card = CollapsibleSection("Translation Items", expanded=True)
+        items_card = StaticSection("Translation Items", expanded=True)
+        self.items_section = items_card
         self.items_table = QTableWidget(0, 6)
         self.items_table.setProperty("stageTable", True)
         self.items_table.setHorizontalHeaderLabels(
@@ -436,7 +442,7 @@ class TranslationPanel(StagePanel):
         items_card.content_layout.addWidget(self.items_table)
         self.content_layout.addWidget(items_card)
 
-        self.editor_section = CollapsibleSection("Translation Item Editor", expanded=False)
+        self.editor_section = StaticSection("Translation Item Editor", expanded=True)
         editor_info_layout = QVBoxLayout()
         editor_info_layout.setContentsMargins(0, 0, 0, 0)
         editor_info_layout.setSpacing(6)
@@ -518,6 +524,12 @@ class TranslationPanel(StagePanel):
         self.content_layout.addWidget(self.editor_section)
 
         self._set_editor_enabled(False)
+
+    def config_sections(self) -> list[QWidget]:
+        return [self.settings_section, self.prompt_section, self.provider_section]
+
+    def simplify_for_config_stage(self) -> None:
+        self.detach_widget(self.summary_section)
 
     def config(self) -> TranslationConfig:
         current_style = self._current_prompt_style()
@@ -620,6 +632,7 @@ class TranslationPanel(StagePanel):
         self.items_table.blockSignals(False)
         summary = summarize_translation_json({"items": self._items})
         self.total_items_value.setText(str(summary.get("total", 0)))
+        self.items_section.set_badge_text(f"{summary.get('total', 0)} items")
         self.pending_items_value.setText(str(summary.get("pending", 0)))
         self.done_items_value.setText(str(summary.get("done", 0)))
         self.error_items_value.setText(str(summary.get("error", 0)))
@@ -653,6 +666,7 @@ class TranslationPanel(StagePanel):
         self.done_items_value.setText("0")
         self.error_items_value.setText("0")
         self.cache_path_value.setText("-")
+        self.items_section.set_badge_text("0 items")
         self.editor_section.set_expanded(False)
         self._set_editor_enabled(False)
         self.crop_preview_panel.clear("Select a translation item to preview the matching OCR crop.")

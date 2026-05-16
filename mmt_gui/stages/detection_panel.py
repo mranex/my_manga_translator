@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from mmt_core import summarize_detection_edit_state
-from mmt_gui.widgets import CollapsibleSection
+from mmt_gui.widgets import CollapsibleSection, StaticSection
 from mmt_gui.widgets.settings_card import style_button
 
 from .base_panel import StagePanel
@@ -54,7 +54,8 @@ class DetectionPanel(StagePanel):
         self._edit_dirty = False
         self._selected_box: dict[str, Any] | None = None
 
-        actions_card = CollapsibleSection("Detection Actions", expanded=True)
+        actions_card = StaticSection("Detection Action", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
@@ -111,6 +112,7 @@ class DetectionPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         stats_card = CollapsibleSection("Detection Stats", expanded=True)
+        self.stats_section = stats_card
         stats_form = QFormLayout()
         stats_form.setContentsMargins(0, 0, 0, 0)
         stats_form.setSpacing(8)
@@ -134,7 +136,8 @@ class DetectionPanel(StagePanel):
         stats_card.content_layout.addLayout(stats_form)
         self.content_layout.addWidget(stats_card)
 
-        editor_card = CollapsibleSection("Detection Box Editor", expanded=True)
+        editor_card = StaticSection("Detection Box Editor", expanded=True)
+        self.editor_section = editor_card
         editor_layout = QGridLayout()
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setHorizontalSpacing(8)
@@ -231,6 +234,9 @@ class DetectionPanel(StagePanel):
         self.content_layout.addWidget(editor_card)
 
         self._update_editor_button_state()
+
+    def simplify_for_config_stage(self) -> None:
+        self.detach_widget(self.stats_section)
 
     def set_detection_data(self, detection_data: dict[str, Any] | None, cache_path: str | None) -> None:
         payload = detection_data or {}

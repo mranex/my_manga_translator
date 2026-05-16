@@ -57,5 +57,11 @@ class StagePanel(QScrollArea):
         self.note_label.setText(normalized)
         self.note_label.setVisible(bool(normalized))
 
+    def detach_widget(self, widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        widget.hide()
+        widget.setParent(None)
+
 
 __all__ = ["StagePanel"]

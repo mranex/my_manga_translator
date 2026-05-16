@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QGridLayout, QLabel, QPushButton, QSpinBox
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QGridLayout, QLabel, QPushButton, QSpinBox, QWidget
 
 from mmt_core import summarize_inpaint_json
-from mmt_gui.widgets import CollapsibleSection
+from mmt_gui.widgets import CollapsibleSection, StaticSection
 from mmt_gui.widgets.settings_card import style_button
 
 from .base_panel import StagePanel
@@ -37,7 +37,8 @@ class InpaintPanel(StagePanel):
         super().__init__("Inpaint", parent)
         self._pending_settings_migration_message: str | None = None
 
-        model_card = CollapsibleSection("LaMa Model", expanded=False)
+        model_card = StaticSection("LaMa Model", expanded=True)
+        self.model_section = model_card
         self.load_model_button = QPushButton("Load LaMa Model")
         style_button(self.load_model_button, "primary")
         self.load_model_button.clicked.connect(self.load_model_requested.emit)
@@ -55,7 +56,8 @@ class InpaintPanel(StagePanel):
         model_card.content_layout.addLayout(model_form)
         self.content_layout.addWidget(model_card)
 
-        actions_card = CollapsibleSection("Inpaint Actions", expanded=True)
+        actions_card = StaticSection("Inpaint Action", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
@@ -144,6 +146,7 @@ class InpaintPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         settings_card = CollapsibleSection("Mask & Device Settings", expanded=False)
+        self.settings_section = settings_card
         settings_form = QFormLayout()
         settings_form.setContentsMargins(0, 0, 0, 0)
         settings_form.setSpacing(8)
@@ -171,6 +174,7 @@ class InpaintPanel(StagePanel):
         self.content_layout.addWidget(settings_card)
 
         details_card = CollapsibleSection("Inpaint Details", expanded=True)
+        self.details_section = details_card
         details_form = QFormLayout()
         details_form.setContentsMargins(0, 0, 0, 0)
         details_form.setSpacing(8)
@@ -208,6 +212,12 @@ class InpaintPanel(StagePanel):
         details_form.addRow("Error:", self.error_value)
         details_card.content_layout.addLayout(details_form)
         self.content_layout.addWidget(details_card)
+
+    def config_sections(self) -> list[QWidget]:
+        return [self.settings_section]
+
+    def simplify_for_config_stage(self) -> None:
+        self.detach_widget(self.details_section)
 
     def settings(self, *, force_override: bool | None = None) -> dict[str, Any]:
         return {

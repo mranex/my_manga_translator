@@ -29,7 +29,7 @@ from mmt_core import (
     summarize_render_edit_state,
     summarize_render_json,
 )
-from mmt_gui.widgets import CollapsibleSection
+from mmt_gui.widgets import CollapsibleSection, StaticSection
 from mmt_gui.widgets.settings_card import style_button
 
 from .base_panel import StagePanel
@@ -66,7 +66,8 @@ class RenderPanel(StagePanel):
         self._box_edit_dirty = False
         self._selected_box: dict[str, Any] | None = None
 
-        actions_card = CollapsibleSection("Render Actions", expanded=True)
+        actions_card = StaticSection("Render Action", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
@@ -155,6 +156,7 @@ class RenderPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         settings_card = CollapsibleSection("Render Settings", expanded=False)
+        self.settings_section = settings_card
         settings_form = QFormLayout()
         settings_form.setContentsMargins(0, 0, 0, 0)
         settings_form.setSpacing(8)
@@ -213,6 +215,7 @@ class RenderPanel(StagePanel):
         self.content_layout.addWidget(settings_card)
 
         details_card = CollapsibleSection("Render Details", expanded=True)
+        self.details_section = details_card
         details_form = QFormLayout()
         details_form.setContentsMargins(0, 0, 0, 0)
         details_form.setSpacing(8)
@@ -247,6 +250,7 @@ class RenderPanel(StagePanel):
         self.content_layout.addWidget(details_card)
 
         items_card = CollapsibleSection("Render Items", expanded=True)
+        self.items_section = items_card
         self.items_table = QTableWidget(0, 8)
         self.items_table.setProperty("stageTable", True)
         self.items_table.setHorizontalHeaderLabels(
@@ -359,6 +363,14 @@ class RenderPanel(StagePanel):
         self.content_layout.addWidget(self.box_editor_section)
 
         self._update_box_editor_state()
+
+    def config_sections(self) -> list[QWidget]:
+        return [self.settings_section]
+
+    def simplify_for_config_stage(self) -> None:
+        self.detach_widget(self.details_section)
+        self.detach_widget(self.items_section)
+        self.detach_widget(self.box_editor_section)
 
     def config(self, *, force_override: bool | None = None) -> RenderConfig:
         try:

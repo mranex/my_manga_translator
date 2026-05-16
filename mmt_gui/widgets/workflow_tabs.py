@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 STAGE_ORDER = (
     ("process", "Process", QStyle.StandardPixmap.SP_BrowserReload),
     ("project", "Project", QStyle.StandardPixmap.SP_DirIcon),
+    ("config", "Config", QStyle.StandardPixmap.SP_FileDialogDetailedView),
     ("detection", "Detection", QStyle.StandardPixmap.SP_FileDialogContentsView),
     ("ocr", "OCR", QStyle.StandardPixmap.SP_FileIcon),
     ("translation", "Translation", QStyle.StandardPixmap.SP_MessageBoxInformation),

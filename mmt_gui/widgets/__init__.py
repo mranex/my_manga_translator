@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .app_header import AppHeader
-from .collapsible_section import CollapsibleSection
+from .collapsible_section import CollapsibleSection, StaticSection
 from .crop_preview_panel import CropPreviewPanel
 from .image_preview import ImagePreviewWidget
 from .left_tool_bar import LeftToolBar
@@ -30,6 +30,7 @@ __all__ = [
     "PreviewToolbar",
     "SettingsCard",
     "StartupOverlay",
+    "StaticSection",
     "StageStatusDot",
     "StageStatusLine",
     "StatusLabel",

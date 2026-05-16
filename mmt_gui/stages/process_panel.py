@@ -86,7 +86,7 @@ class ProcessPanel(StagePanel):
         self.content_layout.addWidget(actions_card)
 
         summary_card = CollapsibleSection("Settings Summary", expanded=True)
-        self.settings_note_label = QLabel("Process uses the current settings from each stage.")
+        self.settings_note_label = QLabel("Process uses the current workflow settings from Config.")
         self.settings_note_label.setWordWrap(True)
         self.settings_note_label.setProperty("role", "muted")
         summary_card.content_layout.addWidget(self.settings_note_label)
@@ -167,7 +167,7 @@ class ProcessPanel(StagePanel):
         progress_card.content_layout.addLayout(progress_form)
         self.content_layout.addWidget(progress_card)
 
-        self.set_stage_note("Process runs Detection through Render using the current stage settings. Export is not included.")
+        self.set_stage_note("Process runs Detection through Render using the current Config settings. Export is not included.")
 
     def set_actions_enabled(self, enabled: bool) -> None:
         self._actions_enabled = bool(enabled)

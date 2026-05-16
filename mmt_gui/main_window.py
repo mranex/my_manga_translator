@@ -85,6 +85,7 @@ from .project import MangaProject, PROJECT_FILENAME, remove_page_from_project
 from .preview_controller import PreviewController, PreviewPreferences
 from .services import ServiceCommandHandle, ServiceManager, ServiceStatusSnapshot
 from .stages import (
+    ConfigPanel,
     DetectionPanel,
     ExportPanel,
     InpaintPanel,
@@ -154,6 +155,7 @@ PREVIEW_RENDER = "Render Result"
 PREVIEW_MODES_BY_STAGE: dict[str, list[str]] = {
     "process": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_MASK, PREVIEW_INPAINT, PREVIEW_RENDER],
     "project": [PREVIEW_SOURCE],
+    "config": [PREVIEW_SOURCE],
     "detection": [PREVIEW_SOURCE, PREVIEW_DETECTION],
     "ocr": [PREVIEW_SOURCE, PREVIEW_DETECTION],
     "translation": [PREVIEW_SOURCE, PREVIEW_DETECTION],
@@ -332,6 +334,18 @@ class MainWindow(QMainWindow):
         self.inpaint_panel = InpaintPanel()
         self.render_panel = RenderPanel(self.workspace_root)
         self.export_panel = ExportPanel()
+        self.config_panel = ConfigPanel(
+            detection_panel=self.detection_panel,
+            ocr_panel=self.ocr_panel,
+            translation_panel=self.translation_panel,
+            inpaint_panel=self.inpaint_panel,
+            render_panel=self.render_panel,
+        )
+        self.detection_panel.simplify_for_config_stage()
+        self.ocr_panel.simplify_for_config_stage()
+        self.translation_panel.simplify_for_config_stage()
+        self.inpaint_panel.simplify_for_config_stage()
+        self.render_panel.simplify_for_config_stage()
         self.export_panel.export_source_input.currentIndexChanged.connect(self._refresh_stage_statuses)
         self.export_panel.output_folder_input.textChanged.connect(self._refresh_stage_statuses)
         self.ocr_panel.items_table.itemSelectionChanged.connect(self._refresh_stage_statuses)
@@ -341,6 +355,7 @@ class MainWindow(QMainWindow):
         self.stage_panels: dict[str, QWidget] = {
             "process": self.process_panel,
             "project": self.project_panel,
+            "config": self.config_panel,
             "detection": self.detection_panel,
             "ocr": self.ocr_panel,
             "translation": self.translation_panel,
@@ -666,16 +681,16 @@ class MainWindow(QMainWindow):
                 auto_preview_result=self.left_toolbar.auto_preview_enabled(),
                 follow_batch_progress=self.left_toolbar.follow_batch_progress_enabled(),
             )
-            self.ocr_panel.apply_settings(self.app_settings.panel_settings("ocr"))
-            self.translation_panel.apply_settings(self.app_settings.panel_settings("translation"))
+            self.config_panel.apply_ocr_settings(self.app_settings.panel_settings("ocr"))
+            self.config_panel.apply_translation_settings(self.app_settings.panel_settings("translation"))
             inpaint_settings = self.app_settings.panel_settings("inpaint")
-            self.inpaint_panel.apply_settings(inpaint_settings)
+            self.config_panel.apply_inpaint_settings(inpaint_settings)
             migration_message = self.inpaint_panel.consume_settings_migration_message()
             if migration_message:
-                migrated_settings = self.inpaint_panel.settings_snapshot()
+                migrated_settings = self.config_panel.inpaint_settings_snapshot()
                 self.app_settings.set_panel_settings("inpaint", migrated_settings)
                 self.log(migration_message)
-            self.render_panel.apply_settings(self.app_settings.panel_settings("render"))
+            self.config_panel.apply_render_settings(self.app_settings.panel_settings("render"))
             self.export_panel.apply_settings(self.app_settings.panel_settings("export"))
         except Exception as exc:
             self.log(f"Settings load failure: {exc}")
@@ -825,10 +840,10 @@ class MainWindow(QMainWindow):
 
     def _persist_panel_preferences(self) -> None:
         try:
-            self.app_settings.set_panel_settings("ocr", self.ocr_panel.settings_snapshot())
-            self.app_settings.set_panel_settings("translation", self.translation_panel.settings_snapshot())
-            self.app_settings.set_panel_settings("inpaint", self.inpaint_panel.settings_snapshot())
-            self.app_settings.set_panel_settings("render", self.render_panel.settings_snapshot())
+            self.app_settings.set_panel_settings("ocr", self.config_panel.ocr_settings_snapshot())
+            self.app_settings.set_panel_settings("translation", self.config_panel.translation_settings_snapshot())
+            self.app_settings.set_panel_settings("inpaint", self.config_panel.inpaint_settings_snapshot())
+            self.app_settings.set_panel_settings("render", self.config_panel.render_settings_snapshot())
             self.app_settings.set_panel_settings("export", self.export_panel.settings_snapshot())
         except Exception as exc:
             self.log(f"Settings save failure: {exc}")
@@ -1361,12 +1376,32 @@ class MainWindow(QMainWindow):
 
     def _on_ocr_provider_changed(self, provider_name: str) -> None:
         normalized = str(provider_name or DEFAULT_OCR_PROVIDER).strip()
-        self.statusBar().showMessage(f"OCR provider set to {self.ocr_panel.ocr_config().provider_label}")
+        self.statusBar().showMessage(f"OCR provider set to {self.current_ocr_config().provider_label}")
         self.log(f"OCR provider selected: {normalized}")
         self._refresh_stage_statuses()
 
+    def current_ocr_config(self) -> OCRConfig:
+        return self.config_panel.ocr_config()
+
+    def current_translation_config(self) -> TranslationConfig:
+        return self.config_panel.translation_config()
+
+    def current_inpaint_settings(self, *, force: bool = False) -> dict[str, Any]:
+        return self.config_panel.inpaint_settings(force_override=force)
+
+    def current_render_config(self, *, force: bool) -> RenderConfig:
+        render_config = self.config_panel.render_config(force_override=force)
+        manual_font_path = render_config.font_path.strip()
+        if manual_font_path:
+            resolve_font_path(
+                self.workspace_root,
+                font_name=render_config.font_name,
+                font_path=manual_font_path,
+            )
+        return render_config
+
     def _ocr_config_from_panel(self) -> OCRConfig:
-        return self.ocr_panel.ocr_config()
+        return self.current_ocr_config()
 
     def _validate_ocr_provider_for_run(self) -> OCRConfig | None:
         ocr_config = self._ocr_config_from_panel()
@@ -1949,14 +1984,14 @@ class MainWindow(QMainWindow):
         if ocr_config is None:
             return None
 
-        translation_config = self.translation_panel.config()
+        translation_config = self.current_translation_config()
         try:
             render_config = self._render_config_from_panel(force=force)
         except Exception as exc:
             self.show_error("Invalid render settings", str(exc))
             return None
 
-        inpaint_settings = self.inpaint_panel.settings(force_override=force)
+        inpaint_settings = self.current_inpaint_settings(force=force)
         return {
             "ocr_config": ocr_config,
             "translation_config": translation_config,
@@ -3677,14 +3712,11 @@ class MainWindow(QMainWindow):
         self._refresh_stage_statuses()
 
     def _refresh_process_panel_summary(self, *, scope_text: str | None = None) -> None:
-        render_style = self.render_panel.font_name_input.currentText().strip()
-        if not render_style:
-            font_path_text = self.render_panel.font_path_input.text().strip()
-            render_style = Path(font_path_text).name if font_path_text else "Auto"
-        inpaint_device = self.inpaint_panel.device_input.currentText().strip() or "auto"
-        target_language = self.translation_panel.target_language_input.currentText().strip() or "en"
-        translator_name = self.translation_panel.translator_input.currentText().strip() or "Google"
-        ocr_provider = self.ocr_panel.ocr_config().provider_label
+        render_style = self.config_panel.render_style_label()
+        inpaint_device = self.config_panel.inpaint_device_label()
+        target_language = self.config_panel.translation_target_language()
+        translator_name = self.config_panel.translation_provider_name()
+        ocr_provider = self.config_panel.ocr_provider_label()
         self.process_panel.set_settings_summary(
             ocr_provider=ocr_provider,
             translator=translator_name,
@@ -4015,7 +4047,7 @@ class MainWindow(QMainWindow):
             stage="translation",
             project=self.current_project,
             image_relative_paths=image_relative_paths,
-            config=self.translation_panel.config(),
+            config=self.current_translation_config(),
             force=force,
         )
         try:
@@ -4050,7 +4082,7 @@ class MainWindow(QMainWindow):
             self.show_error("No project open", "Create or open a project before running translation.")
             return
         self._persist_panel_preferences()
-        translation_config = self.translation_panel.config()
+        translation_config = self.current_translation_config()
 
         task = TranslationTask(
             name=task_name,
@@ -4093,7 +4125,7 @@ class MainWindow(QMainWindow):
             return
         self._persist_panel_preferences()
 
-        settings = self.inpaint_panel.settings(force_override=force)
+        settings = self.current_inpaint_settings(force=force)
         task = InpaintMaskTask(
             name=task_name,
             stage="inpaint",
@@ -4135,7 +4167,7 @@ class MainWindow(QMainWindow):
             return
         self._persist_panel_preferences()
 
-        settings = self.inpaint_panel.settings(force_override=force)
+        settings = self.current_inpaint_settings(force=force)
         task = InpaintTask(
             name=task_name,
             stage="inpaint",
@@ -4172,7 +4204,7 @@ class MainWindow(QMainWindow):
             name=f"LaMa model: {action}",
             stage="inpaint",
             action=action,
-            device=self.inpaint_panel.device_value(),
+            device=self.current_inpaint_settings(force=False).get("device"),
         )
         try:
             self._submit_service_task(
@@ -5581,7 +5613,7 @@ class MainWindow(QMainWindow):
     def _apply_server_inputs_to_manager(self) -> bool:
         try:
             self._persist_panel_preferences()
-            self.llama_server_manager.update_config(**self.ocr_panel.server_values())
+            self.llama_server_manager.update_config(**self.config_panel.ocr_server_values())
         except Exception as exc:
             self.ocr_panel.set_server_status(SERVER_STATE_ERROR)
             self.show_error("Invalid server settings", str(exc))
@@ -5589,15 +5621,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _render_config_from_panel(self, *, force: bool) -> RenderConfig:
-        render_config = self.render_panel.config(force_override=force)
-        manual_font_path = render_config.font_path.strip()
-        if manual_font_path:
-            resolve_font_path(
-                self.workspace_root,
-                font_name=render_config.font_name,
-                font_path=manual_font_path,
-            )
-        return render_config
+        return self.current_render_config(force=force)
 
     def _selected_page_context(self, *, show_error: bool) -> tuple[int, str, Path] | None:
         if self.current_project is None:
@@ -5668,6 +5692,7 @@ class MainWindow(QMainWindow):
         statuses = {
             "process": self._process_stage_status if self.current_project is not None else "missing",
             "project": "done" if self.current_project is not None else "missing",
+            "config": "done",
             "detection": "missing",
             "ocr": "missing",
             "translation": "missing",
@@ -5724,6 +5749,7 @@ class MainWindow(QMainWindow):
             }.get(statuses["process"], "Idle")
         )
         self.project_panel.set_stage_status_text("Ready" if self.current_project is not None else "No project")
+        self.config_panel.set_stage_status_text("Ready")
         self.detection_panel.set_stage_status_text(statuses["detection"].title())
         self.ocr_panel.set_stage_status_text(statuses["ocr"].title())
         self.translation_panel.set_stage_status_text(statuses["translation"].title())
@@ -5945,10 +5971,10 @@ class MainWindow(QMainWindow):
             detection_note = "Detection was edited manually. Re-prepare OCR is recommended."
         self.detection_panel.set_stage_note(detection_note)
         self.process_panel.set_stage_note(
-            "One-click processing is running. The inspector will follow each active stage."
-            if process_running
-            else (
-                "Process runs Detection through Render using the current stage settings. Export is not included."
+                "One-click processing is running. The inspector will follow each active stage."
+                if process_running
+                else (
+                "Process runs Detection through Render using the current Config settings. Export is not included."
                 if has_project
                 else "Open a project before using one-click processing."
             )
