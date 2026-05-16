@@ -17,10 +17,12 @@ from .ocr_items import (
     clamp_bbox_to_image as _ocr_items_clamp_bbox_to_image,
     expand_bbox,
     infer_source_direction,
+    intersect_bboxes,
     is_huge_bbox,
     is_text_like_layout_label,
     overlap_ratio_against_many,
     sort_key_for_region,
+    text_region_belongs_to_bubble,
 )
 
 CANON_STATE_SCHEMA_VERSION = 1
@@ -966,6 +968,18 @@ def _build_active_canon_item(
             item_id=f"{_CANON_ID_PREFIX}{canon_index:04d}",
         )
         ocr_bbox = list(bbox)
+    if kind == "bubble":
+        clipped_ocr_bbox = intersect_bboxes(tuple(ocr_bbox), tuple(bbox), (image_height, image_width, 3))
+        if clipped_ocr_bbox is None:
+            ocr_bbox = list(bbox)
+        else:
+            if tuple(ocr_bbox) != clipped_ocr_bbox and logger is not None:
+                bubble_id = _coerce_optional_int(workflow_item.get("bubble_id"))
+                logger(
+                    f"[canon_state] Clipped bubble OCR bbox to bubble bbox for bubble "
+                    f"{bubble_id if bubble_id is not None else canon_index}."
+                )
+            ocr_bbox = list(clipped_ocr_bbox)
 
     detector_refs = {
         "bubble_id": None,
@@ -985,6 +999,20 @@ def _build_active_canon_item(
             for region in text_regions
             if bubble_id is not None and _coerce_optional_int(region.get("bubble_id")) == bubble_id
         ]
+        filtered_text_regions: list[dict[str, Any]] = []
+        for region in matched_text_regions:
+            text_bbox = _ocr_items_clamp_bbox_to_image(region.get("bbox"), (image_height, image_width, 3))
+            if text_bbox is None:
+                continue
+            if text_region_belongs_to_bubble(text_bbox, tuple(bbox)):
+                filtered_text_regions.append(region)
+                continue
+            if logger is not None:
+                logger(
+                    f"[canon_state] Rejected text region {_coerce_optional_int(region.get('id'))} "
+                    f"for bubble {bubble_id}: outside bubble bbox."
+                )
+        matched_text_regions = filtered_text_regions
         detector_refs["text_region_ids"] = _ids_from_regions(matched_text_regions)
         if not suppressed:
             used_text_region_ids.update(detector_refs["text_region_ids"])
@@ -997,8 +1025,9 @@ def _build_active_canon_item(
                 matched_bubble,
                 exclude_keys={"id", "bbox", "manual", "excluded", "source"},
             )
-        text_mask_bboxes = _bboxes_from_detection_regions(
+        text_mask_bboxes = _clipped_bboxes_from_detection_regions(
             matched_text_regions,
+            clip_bbox=bbox,
             image_width=image_width,
             image_height=image_height,
         )
@@ -1622,6 +1651,33 @@ def _bboxes_from_detection_regions(
             continue
         seen.add(bbox_key)
         boxes.append(list(bbox))
+    return boxes
+
+
+def _clipped_bboxes_from_detection_regions(
+    regions: Sequence[dict[str, Any]],
+    *,
+    clip_bbox: list[int],
+    image_width: int,
+    image_height: int,
+) -> list[list[int]]:
+    boxes: list[list[int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    clip_box_tuple = tuple(clip_bbox)
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        bbox = _sanitize_bbox(region.get("bbox"), image_width=image_width, image_height=image_height)
+        if bbox is None:
+            continue
+        clipped_bbox = intersect_bboxes(tuple(bbox), clip_box_tuple, (image_height, image_width, 3))
+        if clipped_bbox is None:
+            continue
+        bbox_key = tuple(clipped_bbox)
+        if bbox_key in seen:
+            continue
+        seen.add(bbox_key)
+        boxes.append(list(clipped_bbox))
     return boxes
 
 

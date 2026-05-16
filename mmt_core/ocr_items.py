@@ -61,6 +61,20 @@ def build_ocr_items_from_detection(
             for text_region in text_regions
             if text_region.get("bubble_id") == bubble_id
         ]
+        filtered_text_regions: list[dict[str, Any]] = []
+        for text_region in matched_text_regions:
+            text_bbox = clamp_bbox_to_image(text_region.get("bbox"), image_shape)
+            if text_bbox is None:
+                continue
+            if text_region_belongs_to_bubble(text_bbox, bubble_bbox):
+                filtered_text_regions.append(text_region)
+                continue
+            if logger is not None:
+                logger(
+                    f"[ocr_items] Rejected text region {_coerce_int(text_region.get('id'), -1)} "
+                    f"for bubble {bubble_id}: outside bubble bbox."
+                )
+        matched_text_regions = filtered_text_regions
 
         refined_bbox = union_bboxes(
             (
@@ -69,7 +83,15 @@ def build_ocr_items_from_detection(
             ),
             image_shape,
         )
-        ocr_bbox = expand_bbox(refined_bbox, image_shape, 24) if refined_bbox is not None else bubble_bbox
+        if refined_bbox is not None:
+            candidate_ocr_bbox = expand_bbox(refined_bbox, image_shape, 24)
+            ocr_bbox = intersect_bboxes(candidate_ocr_bbox, bubble_bbox, image_shape)
+            if ocr_bbox is None:
+                ocr_bbox = bubble_bbox
+            elif ocr_bbox != candidate_ocr_bbox and logger is not None:
+                logger(f"[ocr_items] Clipped bubble OCR bbox to bubble bbox for bubble {bubble_id}.")
+        else:
+            ocr_bbox = bubble_bbox
         reading_order = _min_reading_order(matched_text_regions)
         source_direction = _first_non_empty(
             [text_region.get("source_direction") for text_region in matched_text_regions]
@@ -328,6 +350,23 @@ def union_bboxes(
     return clamp_bbox_to_image(merged_bbox, image_shape)
 
 
+def intersect_bboxes(
+    a: tuple[int, int, int, int] | None,
+    b: tuple[int, int, int, int] | None,
+    image_shape: Sequence[int],
+) -> tuple[int, int, int, int] | None:
+    if a is None or b is None:
+        return None
+
+    intersection = (
+        max(int(a[0]), int(b[0])),
+        max(int(a[1]), int(b[1])),
+        min(int(a[2]), int(b[2])),
+        min(int(a[3]), int(b[3])),
+    )
+    return clamp_bbox_to_image(intersection, image_shape)
+
+
 def bbox_area(bbox: tuple[int, int, int, int] | None) -> int:
     if bbox is None:
         return 0
@@ -389,6 +428,22 @@ def infer_source_direction(bbox: tuple[int, int, int, int]) -> str:
     width = max(1, int(bbox[2]) - int(bbox[0]))
     height = max(1, int(bbox[3]) - int(bbox[1]))
     return "vertical" if height >= (width * 1.15) else "horizontal"
+
+
+def text_region_belongs_to_bubble(
+    text_bbox: tuple[int, int, int, int],
+    bubble_bbox: tuple[int, int, int, int],
+) -> bool:
+    center_x = (float(text_bbox[0]) + float(text_bbox[2])) / 2.0
+    center_y = (float(text_bbox[1]) + float(text_bbox[3])) / 2.0
+    if (
+        float(bubble_bbox[0]) <= center_x <= float(bubble_bbox[2])
+        and float(bubble_bbox[1]) <= center_y <= float(bubble_bbox[3])
+    ):
+        return True
+
+    text_area = max(1, bbox_area(text_bbox))
+    return (bbox_intersection_area(text_bbox, bubble_bbox) / float(text_area)) >= 0.50
 
 
 def crop_image_to_bbox(image: Any, bbox: Sequence[int | float]) -> Any:
@@ -473,9 +528,11 @@ __all__ = [
     "crop_image_to_bbox",
     "expand_bbox",
     "infer_source_direction",
+    "intersect_bboxes",
     "is_text_like_layout_label",
     "overlap_ratio_against_many",
     "sort_key_for_region",
+    "text_region_belongs_to_bubble",
     "union_bboxes",
     "unique_strings",
 ]
