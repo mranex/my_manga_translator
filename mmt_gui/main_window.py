@@ -152,17 +152,13 @@ PREVIEW_MASK = "Mask Overlay"
 PREVIEW_INPAINT = "Inpaint Result"
 PREVIEW_RENDER = "Render Result"
 
-PREVIEW_MODES_BY_STAGE: dict[str, list[str]] = {
-    "process": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_MASK, PREVIEW_INPAINT, PREVIEW_RENDER],
-    "project": [PREVIEW_SOURCE],
-    "config": [PREVIEW_SOURCE],
-    "detection": [PREVIEW_SOURCE, PREVIEW_DETECTION],
-    "ocr": [PREVIEW_SOURCE, PREVIEW_DETECTION],
-    "translation": [PREVIEW_SOURCE, PREVIEW_DETECTION],
-    "inpaint": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_MASK, PREVIEW_INPAINT],
-    "render": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_INPAINT, PREVIEW_RENDER],
-    "export": [PREVIEW_SOURCE, PREVIEW_INPAINT, PREVIEW_RENDER],
-}
+GLOBAL_PREVIEW_MODES = [
+    PREVIEW_SOURCE,
+    PREVIEW_DETECTION,
+    PREVIEW_MASK,
+    PREVIEW_INPAINT,
+    PREVIEW_RENDER,
+]
 
 
 class MainWindow(QMainWindow):
@@ -1012,7 +1008,7 @@ class MainWindow(QMainWindow):
         self.workflow_tabs.set_current_stage(stage_key)
         self.stage_stack.setCurrentIndex(self.stage_indices[stage_key])
         self.left_toolbar.set_modes(
-            PREVIEW_MODES_BY_STAGE.get(stage_key, [PREVIEW_SOURCE]),
+            GLOBAL_PREVIEW_MODES,
             self.left_toolbar.current_mode(),
         )
         self._refresh_stage_statuses()
@@ -4540,6 +4536,13 @@ class MainWindow(QMainWindow):
         )
         if not target_mode:
             return
+        if target_mode == PREVIEW_RENDER and not self._preview_mode_artifact_exists(PREVIEW_RENDER, image_relative_path):
+            self.log(
+                f"Preview requested Render Result for {Path(image_relative_path or '').name or 'current page'}, "
+                "but no render output is available yet.",
+                level="warning",
+            )
+            return
         if stage_name == "detection":
             self.preview_detection_overlay_enabled = True
         self.set_preview_mode(target_mode)
@@ -5491,6 +5494,9 @@ class MainWindow(QMainWindow):
         if current_index is not None:
             self._load_cached_render_for_index(current_index, show_errors=False)
             self._refresh_preview_for_current_page()
+            current_page = self.current_page()
+            if current_page is not None:
+                self._apply_preview_after_stage("render", image_relative_path=current_page)
 
         success_count = len(result.image_paths)
         failure_count = len(result.failures)
