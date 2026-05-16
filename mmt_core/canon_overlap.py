@@ -1,4 +1,10 @@
-"""Resolve overlapping OCR workflow items before canon_state activation."""
+"""Resolve duplicate detection-region workflow candidates before canon activation.
+
+This resolver operates on detection-region geometry only. It intentionally uses
+``bbox`` and never ``ocr_bbox`` because OCR crop boxes may include padding,
+unioned text coverage, or other downstream context that must not drive
+duplicate-region suppression.
+"""
 
 from __future__ import annotations
 
@@ -17,29 +23,38 @@ def resolve_largest_overlap_components(
     *,
     logger: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep the largest workflow item in each overlap component."""
+    """Keep the largest detection-region bbox in each same-group component."""
 
     resolved_items: list[dict[str, Any]] = [deepcopy(item) for item in items if isinstance(item, dict)]
+    grouped_candidate_indices: dict[str, list[int]] = {}
     indexed_boxes: dict[int, tuple[int, int, int, int]] = {}
-    indexed_ocr_areas: dict[int, int] = {}
-    candidate_indices: list[int] = []
 
     for workflow_index, item in enumerate(resolved_items):
         item["workflow_index"] = workflow_index
         compare_box = _compare_box(item, image_shape)
         if compare_box is None or _is_manual_item(item):
             continue
+        overlap_group_kind = _overlap_group_kind(item)
+        if overlap_group_kind is None:
+            continue
         indexed_boxes[workflow_index] = compare_box
-        indexed_ocr_areas[workflow_index] = _ocr_box_area(item, image_shape)
-        candidate_indices.append(workflow_index)
+        grouped_candidate_indices.setdefault(overlap_group_kind, []).append(workflow_index)
 
-    components = _connected_components(candidate_indices, indexed_boxes)
-    grouped_components = [component for component in components if len(component) > 1]
+    grouped_components: list[list[int]] = []
+    candidate_count = 0
+    for candidate_indices in grouped_candidate_indices.values():
+        candidate_count += len(candidate_indices)
+        grouped_components.extend(
+            component
+            for component in _connected_components(candidate_indices, indexed_boxes)
+            if len(component) > 1
+        )
+
     suppressed_count = 0
 
     for component_index, component in enumerate(grouped_components, start=1):
         overlap_group_id = f"overlap_{component_index:04d}"
-        winner_index = _winner_for_component(component, indexed_boxes, indexed_ocr_areas)
+        winner_index = _winner_for_component(component, indexed_boxes)
         winner_item = resolved_items[winner_index]
         winner_metadata = _ensure_metadata_dict(winner_item)
         winner_item["suppressed"] = False
@@ -80,7 +95,7 @@ def resolve_largest_overlap_components(
     if logger is not None:
         logger(
             "[canon_overlap] Resolved "
-            f"{len(grouped_components)} overlap components across {len(candidate_indices)} workflow items; "
+            f"{len(grouped_components)} overlap components across {candidate_count} workflow items; "
             f"suppressed {suppressed_count} smaller items."
         )
 
@@ -88,14 +103,7 @@ def resolve_largest_overlap_components(
 
 
 def _compare_box(item: dict[str, Any], image_shape: Sequence[int]) -> tuple[int, int, int, int] | None:
-    ocr_bbox = clamp_bbox_to_image(item.get("ocr_bbox"), image_shape)
-    if ocr_bbox is not None:
-        return ocr_bbox
     return clamp_bbox_to_image(item.get("bbox"), image_shape)
-
-
-def _ocr_box_area(item: dict[str, Any], image_shape: Sequence[int]) -> int:
-    return _bbox_area(clamp_bbox_to_image(item.get("ocr_bbox"), image_shape))
 
 
 def _bbox_area(box: tuple[int, int, int, int] | None) -> int:
@@ -171,16 +179,25 @@ def _connected_components(
 def _winner_for_component(
     component: Sequence[int],
     indexed_boxes: dict[int, tuple[int, int, int, int]],
-    indexed_ocr_areas: dict[int, int],
 ) -> int:
     return sorted(
         component,
         key=lambda workflow_index: (
             -_bbox_area(indexed_boxes[workflow_index]),
-            -indexed_ocr_areas.get(workflow_index, 0),
             workflow_index,
         ),
     )[0]
+
+
+def _overlap_group_kind(item: dict[str, Any]) -> str | None:
+    kind = str(item.get("kind", "") or "").strip().lower()
+    if kind == "bubble":
+        return "bubble"
+    if kind in {"outside_text", "text_region"}:
+        return "text_region"
+    if kind == "layout_text":
+        return "layout_text"
+    return None
 
 
 def _is_manual_item(item: dict[str, Any]) -> bool:

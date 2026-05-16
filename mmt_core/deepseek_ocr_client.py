@@ -9,7 +9,7 @@ from typing import Any
 
 
 DEFAULT_PROMPT = "<image>\nFree OCR."
-DEFAULT_MAX_TOKENS = 8192
+DEFAULT_MAX_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.0
 
 
@@ -36,7 +36,11 @@ class DeepSeekOCRClient:
         self.server_url = normalized_url
         self.timeout = float(timeout)
         self.prompt = str(prompt or DEFAULT_PROMPT).strip() or DEFAULT_PROMPT
-        self.max_tokens = int(max_tokens)
+        try:
+            resolved_max_tokens = int(max_tokens)
+        except Exception:
+            resolved_max_tokens = DEFAULT_MAX_TOKENS
+        self.max_tokens = max(32, min(resolved_max_tokens, DEFAULT_MAX_TOKENS))
         self.temperature = 0.0
 
     def check_server(self) -> str:
