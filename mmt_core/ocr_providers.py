@@ -15,7 +15,6 @@ from .ocr_models import (
     OCRConfig,
     is_known_ocr_provider,
 )
-from .paddleocr_vl_client import PaddleOCRVLClient, PaddleOCRVLClientError
 
 
 class OCRProviderError(RuntimeError):
@@ -42,37 +41,63 @@ class PaddleOCRVLProvider:
     provider_key: ClassVar[str] = OCR_PROVIDER_PADDLE_VL_LLAMA
     provider_label: ClassVar[str] = OCR_PROVIDER_LABELS[OCR_PROVIDER_PADDLE_VL_LLAMA]
     config: OCRConfig
-    _client: PaddleOCRVLClient = field(init=False)
+    _engine: Any = field(init=False)
 
     def __post_init__(self) -> None:
         server_url = str(self.config.server_url or "").strip()
         if not server_url:
             raise OCRProviderError("OCR provider is not configured.")
-        self._client = PaddleOCRVLClient(
+
+        try:
+            from ocr.paddleocr_vl_ocr import PaddleOCRVLOCR
+        except Exception as exc:
+            raise OCRProviderError(
+                f"PaddleOCR-VL OCR backend is unavailable: {exc}"
+            ) from exc
+
+        self._engine = PaddleOCRVLOCR(
             server_url=server_url,
-            timeout=float(self.config.timeout),
+            auto_start_server=False,
+            timeout=int(self.config.timeout),
         )
 
     def validate(self) -> None:
         try:
-            self._client.check_server()
-        except PaddleOCRVLClientError as exc:
+            is_alive = bool(self._engine.is_server_alive())
+        except Exception as exc:
             raise OCRProviderError(str(exc)) from exc
 
+        if not is_alive:
+            raise OCRProviderError(
+                "PaddleOCR-VL server is not reachable. Start the llama.cpp server from the OCR tab first."
+            )
+
     def recognize_image(self, crop_path: Path | str) -> str:
+        image_file = Path(crop_path).expanduser().resolve()
+        if not image_file.exists():
+            raise FileNotFoundError(f"OCR crop file is missing: {image_file}")
+
         try:
-            return self._client.recognize_image(crop_path)
-        except PaddleOCRVLClientError as exc:
+            from PIL import Image
+
+            with Image.open(image_file) as image:
+                return self._engine.recognize(image.convert("RGB"))
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
             raise OCRProviderError(str(exc)) from exc
 
     def close(self) -> None:
-        return None
+        try:
+            self._engine.close()
+        except Exception:
+            return None
 
     def item_metadata(self) -> dict[str, Any]:
         return {
             "ocr_engine": self.provider_key,
             "ocr_provider": self.provider_label,
-            "server_url": self._client.server_url,
+            "server_url": str(getattr(self._engine, "server_url", "") or ""),
         }
 
 
