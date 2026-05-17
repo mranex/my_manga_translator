@@ -178,6 +178,9 @@ class DeepSeekOCRProvider:
     def close(self) -> None:
         return None
 
+    def clear_after_page(self, logger: Any = None) -> dict[str, Any]:
+        return self._client.clear_server_slots(logger=logger)
+
     def item_metadata(self) -> dict[str, Any]:
         return {
             "ocr_engine": self.provider_key,

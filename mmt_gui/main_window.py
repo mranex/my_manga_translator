@@ -5811,7 +5811,10 @@ class MainWindow(QMainWindow):
     def _apply_server_inputs_to_manager(self) -> bool:
         try:
             self._persist_panel_preferences()
-            self.llama_server_manager.update_config(**self.config_panel.ocr_server_values())
+            self.llama_server_manager.update_config(
+                **self.config_panel.ocr_server_values(),
+                provider_key=self.current_ocr_config().ocr_provider,
+            )
         except Exception as exc:
             self.ocr_panel.set_server_status(SERVER_STATE_ERROR)
             self.show_error("Invalid server settings", str(exc))

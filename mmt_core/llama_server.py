@@ -11,6 +11,8 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
+from .ocr_models import OCR_PROVIDER_DEEPSEEK_OCR_LLAMA
+
 
 @dataclass(slots=True)
 class LlamaServerStatus:
@@ -36,6 +38,7 @@ class LlamaServerManager:
         llama_cpp_dir: str | Path = "",
         gpu_layers: int = 99,
         ctx_size: int = 8192,
+        provider_key: str = "",
     ) -> None:
         self.server_url = ""
         self.host = host
@@ -45,6 +48,7 @@ class LlamaServerManager:
         self.llama_cpp_dir = str(llama_cpp_dir)
         self.gpu_layers = int(gpu_layers)
         self.ctx_size = int(ctx_size)
+        self.provider_key = str(provider_key or "").strip()
         self._process: subprocess.Popen[Any] | None = None
         self.update_config(
             server_url=server_url,
@@ -55,6 +59,7 @@ class LlamaServerManager:
             llama_cpp_dir=llama_cpp_dir,
             gpu_layers=gpu_layers,
             ctx_size=ctx_size,
+            provider_key=provider_key,
         )
 
     def update_config(
@@ -68,6 +73,7 @@ class LlamaServerManager:
         llama_cpp_dir: str | Path | None = None,
         gpu_layers: int | None = None,
         ctx_size: int | None = None,
+        provider_key: str | None = None,
     ) -> None:
         if server_url is not None:
             normalized_url, parsed_host, parsed_port = self._normalize_server_url(server_url)
@@ -91,6 +97,8 @@ class LlamaServerManager:
             self.gpu_layers = int(gpu_layers)
         if ctx_size is not None:
             self.ctx_size = int(ctx_size)
+        if provider_key is not None:
+            self.provider_key = str(provider_key or "").strip()
 
     def resolve_binary_path(self) -> Path:
         search_names = ("llama-server.exe", "llama-server")
@@ -121,12 +129,12 @@ class LlamaServerManager:
             "Could not find the llama-server binary. Check the llama.cpp directory or PATH."
         )
 
-    def build_command(self) -> list[str]:
+    def build_command(self, *, disable_prompt_cache: bool | None = None) -> list[str]:
         model_file = self._validate_existing_file(self.model_path, "model.gguf")
         mmproj_file = self._validate_existing_file(self.mmproj_path, "mmproj.gguf")
         binary_path = self.resolve_binary_path()
 
-        return [
+        command = [
             str(binary_path),
             "-m",
             str(model_file),
@@ -143,6 +151,18 @@ class LlamaServerManager:
             "--temp",
             "0",
         ]
+        if disable_prompt_cache is None:
+            disable_prompt_cache = self._should_disable_prompt_cache()
+        if disable_prompt_cache:
+            command.extend(
+                [
+                    "--no-cache-prompt",
+                    "--cache-ram",
+                    "0",
+                    "--no-cache-idle-slots",
+                ]
+            )
+        return command
 
     def check_server(self, *, timeout: float = 3.0) -> LlamaServerStatus:
         alive, message = self._probe_server(timeout=timeout)
@@ -178,44 +198,60 @@ class LlamaServerManager:
                 managed=existing_status.managed,
             )
 
-        command = self.build_command()
-        self._terminate_managed_process_if_stale()
-        self._log(logger, f"Starting llama.cpp server: {' '.join(command)}")
+        use_cache_safe_flags = self._should_disable_prompt_cache()
+        command_variants: list[tuple[list[str], bool]] = [
+            (self.build_command(disable_prompt_cache=use_cache_safe_flags), use_cache_safe_flags)
+        ]
+        if use_cache_safe_flags:
+            command_variants.append((self.build_command(disable_prompt_cache=False), False))
 
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        working_directory = self._resolve_working_directory()
-        self._process = subprocess.Popen(
-            command,
-            cwd=str(working_directory) if working_directory is not None else None,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
-        )
+        fallback_triggered = False
 
-        deadline = time.time() + float(timeout)
-        while time.time() < deadline:
-            if self._process.poll() is not None:
-                exit_code = self._process.returncode
-                self._process = None
-                return LlamaServerStatus(
-                    state="Error",
-                    message=f"llama.cpp server exited during startup with code {exit_code}.",
-                    is_alive=False,
-                    managed=False,
+        for attempt_index, (command, using_cache_safe_flags) in enumerate(command_variants):
+            self._terminate_managed_process_if_stale()
+            if using_cache_safe_flags:
+                self._log(
+                    logger,
+                    "Starting DeepSeek OCR llama-server with prompt cache disabled/reduced.",
                 )
+            self._log(logger, f"Starting llama.cpp server: {' '.join(command)}")
+            self._process = self._spawn_process(command)
 
-            alive, message = self._probe_server(timeout=2.0)
-            if alive:
+            startup = self._wait_for_startup(timeout=float(timeout), poll_interval=float(poll_interval))
+            if startup["ready"]:
+                if fallback_triggered:
+                    self._log(
+                        logger,
+                        "llama.cpp did not accept DeepSeek OCR cache-control flags; started without them. "
+                        "Slot erase will still be attempted after each page.",
+                    )
                 return LlamaServerStatus(
                     state="Ready",
-                    message=message,
+                    message=str(startup["message"]),
                     is_alive=True,
                     managed=True,
                 )
 
-            time.sleep(float(poll_interval))
+            if (
+                using_cache_safe_flags
+                and attempt_index + 1 < len(command_variants)
+                and self._is_cache_flag_rejection(str(startup.get("stderr", "") or ""))
+            ):
+                fallback_triggered = True
+                self._log(
+                    logger,
+                    "llama.cpp did not accept DeepSeek OCR cache-control flags; retrying without them. "
+                    "Slot erase will still be attempted after each page.",
+                )
+                continue
 
-        self.stop_server(timeout=5.0)
+            return LlamaServerStatus(
+                state="Error",
+                message=str(startup["message"]),
+                is_alive=False,
+                managed=False,
+            )
+
         return LlamaServerStatus(
             state="Error",
             message=f"Timed out waiting for llama.cpp server to become ready at {self.server_url}.",
@@ -322,6 +358,98 @@ class LlamaServerManager:
     def _log(self, logger: Callable[[str], None] | None, message: str) -> None:
         if logger is not None:
             logger(message)
+
+    def _should_disable_prompt_cache(self) -> bool:
+        return self.provider_key == OCR_PROVIDER_DEEPSEEK_OCR_LLAMA
+
+    def _spawn_process(self, command: list[str]) -> subprocess.Popen[Any]:
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        working_directory = self._resolve_working_directory()
+        return subprocess.Popen(
+            command,
+            cwd=str(working_directory) if working_directory is not None else None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
+
+    def _wait_for_startup(self, *, timeout: float, poll_interval: float) -> dict[str, Any]:
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            if self._process is not None and self._process.poll() is not None:
+                exit_code = self._process.returncode
+                stderr_text = self._read_process_stderr(self._process)
+                self._process = None
+                excerpt = self._stderr_excerpt(stderr_text)
+                message = f"llama.cpp server exited during startup with code {exit_code}."
+                if excerpt:
+                    message = f"{message} {excerpt}"
+                return {
+                    "ready": False,
+                    "message": message,
+                    "stderr": stderr_text,
+                }
+
+            alive, message = self._probe_server(timeout=2.0)
+            if alive:
+                return {
+                    "ready": True,
+                    "message": message,
+                    "stderr": "",
+                }
+
+            time.sleep(float(poll_interval))
+
+        self.stop_server(timeout=5.0)
+        return {
+            "ready": False,
+            "message": f"Timed out waiting for llama.cpp server to become ready at {self.server_url}.",
+            "stderr": "",
+        }
+
+    def _read_process_stderr(self, process: subprocess.Popen[Any]) -> str:
+        stderr_stream = getattr(process, "stderr", None)
+        if stderr_stream is None:
+            return ""
+        try:
+            output = stderr_stream.read()
+        except Exception:
+            return ""
+        return output if isinstance(output, str) else ""
+
+    def _stderr_excerpt(self, stderr_text: str) -> str:
+        normalized = " ".join(str(stderr_text or "").split())
+        if not normalized:
+            return ""
+        return normalized[:400]
+
+    def _is_cache_flag_rejection(self, stderr_text: str) -> bool:
+        normalized = str(stderr_text or "").lower()
+        if not normalized:
+            return False
+        mentions_cache_flag = any(
+            flag in normalized
+            for flag in (
+                "--no-cache-prompt",
+                "--cache-ram",
+                "--no-cache-idle-slots",
+            )
+        )
+        mentions_argument_error = any(
+            phrase in normalized
+            for phrase in (
+                "unknown argument",
+                "unknown option",
+                "unrecognized option",
+                "unrecognized argument",
+                "invalid argument",
+                "unexpected argument",
+            )
+        )
+        return mentions_cache_flag and mentions_argument_error
 
     def _requests_module(self) -> Any:
         try:

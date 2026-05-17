@@ -251,6 +251,12 @@ class OCRService(BaseService):
                         "message": f"OCR complete for {page_name}",
                     }
                 )
+            finally:
+                self._clear_provider_page_cache(
+                    provider,
+                    page_name=page_name,
+                    logger=bridge.message.emit,
+                )
             bridge.progress.emit(int((page_index / total_pages) * 100))
 
         successful_pages = [result for result in page_results if result.json_path is not None]
@@ -276,6 +282,46 @@ class OCRService(BaseService):
         self._provider = create_ocr_provider(config)
         self._provider_key = provider_key
         return self._provider
+
+    def _clear_provider_page_cache(
+        self,
+        provider: OCRProvider,
+        *,
+        page_name: str,
+        logger: Any,
+    ) -> None:
+        clear_after_page = getattr(provider, "clear_after_page", None)
+        if not callable(clear_after_page):
+            return
+
+        try:
+            result = clear_after_page()
+        except Exception as exc:
+            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {exc}")
+            return
+
+        if not isinstance(result, dict):
+            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: unexpected result.")
+            return
+
+        errors = result.get("errors")
+        if not isinstance(errors, list):
+            errors = []
+
+        if not bool(result.get("supported", False)):
+            if str(result.get("reason", "")).strip() == "unsupported":
+                logger("llama.cpp /slots erase endpoint is unavailable; skipping DeepSeek OCR slot cache clear.")
+            elif errors:
+                logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {errors[0]}")
+            return
+
+        logger(
+            "Cleared DeepSeek OCR llama.cpp slot cache after page "
+            f"{page_name}: cleared={int(result.get('cleared', 0))}, "
+            f"skipped_processing={int(result.get('skipped_processing', 0))}"
+        )
+        if errors:
+            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {errors[0]}")
 
     def _close_provider(self) -> None:
         if self._provider is None:

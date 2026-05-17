@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_PROMPT = "<image>\nFree OCR."
@@ -84,6 +84,99 @@ class DeepSeekOCRClient:
 
         image_b64 = base64.b64encode(image_file.read_bytes()).decode("ascii")
         return self._chat_completion(image_b64)
+
+    def clear_server_slots(
+        self,
+        *,
+        logger: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Best-effort llama.cpp slot erase for page-level memory hygiene."""
+
+        requests = self._requests_module()
+        request_error = self._request_exception_class(requests)
+        timeout = min(self.timeout, 10.0)
+        result: dict[str, Any] = {
+            "supported": False,
+            "cleared": 0,
+            "skipped_processing": 0,
+            "errors": [],
+            "reason": "",
+        }
+
+        try:
+            response = requests.get(f"{self.server_url}/slots", timeout=timeout)
+        except request_error as exc:
+            result["reason"] = "request_failed"
+            result["errors"].append(f"Unable to query llama.cpp slots: {exc}")
+            self._log(logger, "DeepSeek OCR slot cache clear skipped because /slots could not be queried.")
+            return result
+
+        status_code = int(getattr(response, "status_code", 0))
+        if status_code in {404, 405}:
+            result["reason"] = "unsupported"
+            return result
+        if status_code >= 400:
+            result["reason"] = "http_error"
+            result["errors"].append(f"GET /slots returned HTTP {status_code}.")
+            self._log(
+                logger,
+                f"DeepSeek OCR slot cache clear skipped because /slots returned HTTP {status_code}.",
+            )
+            return result
+
+        try:
+            slots_payload = response.json()
+        except Exception:
+            result["reason"] = "invalid_response"
+            result["errors"].append("GET /slots returned invalid JSON.")
+            self._log(logger, "DeepSeek OCR slot cache clear skipped because /slots returned invalid JSON.")
+            return result
+
+        if not isinstance(slots_payload, list):
+            result["reason"] = "invalid_response"
+            result["errors"].append("GET /slots did not return a slot list.")
+            self._log(logger, "DeepSeek OCR slot cache clear skipped because /slots returned an invalid payload.")
+            return result
+
+        result["supported"] = True
+
+        for slot in slots_payload:
+            if not isinstance(slot, dict):
+                result["errors"].append("Skipped malformed slot payload.")
+                continue
+
+            raw_slot_id = slot.get("id", slot.get("id_slot"))
+            try:
+                slot_id = int(raw_slot_id)
+            except Exception:
+                continue
+
+            if bool(slot.get("is_processing")):
+                result["skipped_processing"] += 1
+                continue
+
+            try:
+                erase_response = requests.post(
+                    f"{self.server_url}/slots/{slot_id}?action=erase",
+                    timeout=timeout,
+                )
+            except request_error as exc:
+                result["errors"].append(f"Slot {slot_id} erase failed: {exc}")
+                continue
+
+            erase_status = int(getattr(erase_response, "status_code", 0))
+            if erase_status in {404, 405}:
+                result["supported"] = False
+                result["reason"] = "unsupported"
+                result["errors"].append(f"Slot {slot_id} erase returned HTTP {erase_status}.")
+                break
+            if erase_status >= 400:
+                result["errors"].append(f"Slot {slot_id} erase returned HTTP {erase_status}.")
+                continue
+
+            result["cleared"] += 1
+
+        return result
 
     def _chat_completion(self, image_b64: str) -> str:
         requests = self._requests_module()
@@ -277,6 +370,10 @@ class DeepSeekOCRClient:
         if not isinstance(text, str):
             return "(no response body)"
         return text[:400] or "(empty response body)"
+
+    def _log(self, logger: Callable[[str], None] | None, message: str) -> None:
+        if logger is not None:
+            logger(message)
 
 
 __all__ = [
