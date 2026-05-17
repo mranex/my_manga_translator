@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Sequence
+from typing import Any, Sequence
 
 try:
     import numpy as np
@@ -12,7 +12,6 @@ from detectors.runtime_utils import (
     clamp_bbox_to_image,
     expand_bbox,
     normalize_binary_mask,
-    union_text_regions_bbox,
 )
 
 from .strategy import crop_windows_from_bboxes
@@ -111,27 +110,6 @@ def _close_mask(mask, kernel_size: int = 3):
     return out.astype(np_module.uint8)
 
 
-def _apply_region_mask(mask, region, image_shape: Sequence[int], *, dilation: int = 2) -> None:
-    np_module = _require_numpy()
-    if region is None or getattr(region, "mask", None) is None:
-        return
-    full_mask = normalize_binary_mask(region.mask, image_shape)
-    if dilation > 0:
-        full_mask = _dilate_mask(full_mask, dilation)
-    mask[:] = np_module.maximum(mask, full_mask)
-
-
-def _collect_text_regions(item) -> list:
-    text_regions = list(item.get("text_regions") or [])
-    if (
-        item.get("kind") == "outside_text"
-        and item.get("text_region") is not None
-        and not any(region is item.get("text_region") for region in text_regions)
-    ):
-        text_regions.append(item["text_region"])
-    return text_regions
-
-
 def _dedupe_bboxes(boxes):
     deduped = []
     seen = set()
@@ -144,6 +122,42 @@ def _dedupe_bboxes(boxes):
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def _candidate_boxes_from_item(
+    item,
+    image_shape: Sequence[int],
+    *,
+    block_padding: int,
+    min_padding: int,
+):
+    candidate_bboxes = []
+
+    explicit_bboxes = list(item.get("text_mask_bboxes") or [])
+    explicit_bboxes.extend(item.get("inpaint_bboxes") or [])
+    if item.get("inpaint_bbox") is not None:
+        explicit_bboxes.append(item.get("inpaint_bbox"))
+
+    for explicit_bbox in explicit_bboxes:
+        clamped_bbox = clamp_bbox_to_image(explicit_bbox, image_shape)
+        if clamped_bbox is not None:
+            candidate_bboxes.append(clamped_bbox)
+
+    for padded_key, padding in (
+        ("render_bbox", block_padding),
+        ("ocr_bbox", min_padding),
+        ("bbox", min_padding),
+        ("fallback_text_bbox", max(min_padding, block_padding // 2)),
+    ):
+        raw_bbox = item.get(padded_key)
+        if raw_bbox is None:
+            continue
+        clamped_bbox = clamp_bbox_to_image(raw_bbox, image_shape)
+        if clamped_bbox is None:
+            continue
+        candidate_bboxes.append(expand_bbox(clamped_bbox, image_shape, padding))
+
+    return _dedupe_bboxes(candidate_bboxes)
 
 
 def collect_item_inpaint_bboxes(
@@ -159,33 +173,13 @@ def collect_item_inpaint_bboxes(
     if resolved_cached is not None:
         return list(resolved_cached)
 
-    text_regions = _collect_text_regions(item)
-    candidate_bboxes = []
-    explicit_bboxes = list(item.get("inpaint_bboxes") or [])
-    if item.get("inpaint_bbox") is not None:
-        explicit_bboxes.append(item.get("inpaint_bbox"))
-    for explicit_bbox in explicit_bboxes:
-        candidate_bboxes.append(clamp_bbox_to_image(explicit_bbox, image_shape))
+    deduped = _candidate_boxes_from_item(
+        item,
+        image_shape,
+        block_padding=block_padding,
+        min_padding=min_padding,
+    )
 
-    text_block_bbox = None
-    if text_regions:
-        text_block_bbox = union_text_regions_bbox(text_regions, image_shape, padding=0)
-        if text_block_bbox is not None:
-            candidate_bboxes.append(expand_bbox(text_block_bbox, image_shape, block_padding))
-
-    render_bbox = item.get("render_bbox")
-    if render_bbox is not None:
-        candidate_bboxes.append(expand_bbox(render_bbox, image_shape, min_padding))
-
-    ocr_bbox = item.get("ocr_bbox")
-    if ocr_bbox is not None:
-        candidate_bboxes.append(expand_bbox(ocr_bbox, image_shape, min_padding))
-
-    fallback_bbox = item.get("fallback_text_bbox")
-    if fallback_bbox is not None and item.get("inpaint_fallback_used"):
-        candidate_bboxes.append(expand_bbox(fallback_bbox, image_shape, max(min_padding, block_padding // 2)))
-
-    deduped = _dedupe_bboxes(candidate_bboxes)
     accepted = []
     emergency_candidates = []
     for bbox in deduped:
@@ -203,7 +197,6 @@ def collect_item_inpaint_bboxes(
 
     if not accepted and emergency_candidates:
         accepted.extend(emergency_candidates)
-
     return accepted
 
 
@@ -214,14 +207,11 @@ def build_text_block_removal_mask(
     block_padding: int = 14,
     min_padding: int = 8,
     dilation: int = 4,
-    prefer_block_bbox: bool = True,
 ):
     np_module = _require_numpy()
     mask = _empty_mask(image_shape)
 
     for item in render_items or []:
-        item_mask = _empty_mask(image_shape)
-
         candidate_bboxes = collect_item_inpaint_bboxes(
             item,
             image_shape,
@@ -229,13 +219,7 @@ def build_text_block_removal_mask(
             min_padding=min_padding,
         )
         for candidate_bbox in candidate_bboxes:
-            _apply_bbox_mask(item_mask, candidate_bbox)
-
-        if prefer_block_bbox:
-            for region in _collect_text_regions(item):
-                _apply_region_mask(item_mask, region, image_shape, dilation=max(1, min_padding // 4))
-
-        mask[:] = np_module.maximum(mask, item_mask)
+            _apply_bbox_mask(mask, candidate_bbox)
 
     mask = _dilate_mask(mask, dilation)
     mask = _close_mask(mask, 3 if dilation <= 4 else 5)
@@ -249,7 +233,6 @@ def build_text_removal_mask(image_shape: Sequence[int], render_items, dilation: 
         block_padding=14,
         min_padding=8,
         dilation=max(4, dilation),
-        prefer_block_bbox=True,
     )
 
 
@@ -284,14 +267,26 @@ def build_bubble_mask(image_shape: Sequence[int], render_items):
     for item in render_items or []:
         if item.get("kind") != "bubble":
             continue
+
+        bubble_mask = item.get("bubble_mask")
+        if bubble_mask is not None:
+            binary_mask = normalize_binary_mask(bubble_mask, image_shape)
+            mask[:] = np_module.maximum(mask, binary_mask)
+            continue
+
         bubble_region = item.get("bubble_region")
-        if bubble_region is None:
-            continue
-        if bubble_region.mask is not None:
-            bubble_mask = normalize_binary_mask(bubble_region.mask, image_shape)
-            mask[:] = np_module.maximum(mask, bubble_mask)
-            continue
-        _apply_bbox_mask(mask, clamp_bbox_to_image(bubble_region.bbox, image_shape))
+        if bubble_region is not None:
+            if getattr(bubble_region, "mask", None) is not None:
+                binary_mask = normalize_binary_mask(bubble_region.mask, image_shape)
+                mask[:] = np_module.maximum(mask, binary_mask)
+                continue
+            bubble_bbox = getattr(bubble_region, "bbox", None)
+        else:
+            bubble_bbox = item.get("bbox")
+
+        clamped_bbox = clamp_bbox_to_image(bubble_bbox, image_shape) if bubble_bbox is not None else None
+        if clamped_bbox is not None:
+            _apply_bbox_mask(mask, clamped_bbox)
 
     return mask
 

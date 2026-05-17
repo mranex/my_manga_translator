@@ -943,7 +943,9 @@ def _import_inpainting():
         import inpainting
     except Exception as exc:
         raise RuntimeError(
-            "LaMa Manga dependencies are not available. Install the inpainting runtime dependencies first."
+            "LaMa Manga runtime import failed. "
+            "This may be missing dependencies or an internal import error. "
+            f"Original error: {exc.__class__.__name__}: {exc}"
         ) from exc
     return inpainting
 

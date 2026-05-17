@@ -335,20 +335,6 @@ def crop_windows_from_bboxes(
     return _merge_boxes(windows)
 
 
-def crop_windows_from_text_regions(
-    text_regions,
-    image_shape: Sequence[int],
-    ratio: float = 1.7,
-    aspect_ratio: float = 1.0,
-) -> list[BBox]:
-    return crop_windows_from_bboxes(
-        [text_region.bbox for text_region in text_regions or []],
-        image_shape,
-        ratio=ratio,
-        aspect_ratio=aspect_ratio,
-    )
-
-
 def apply_bubble_fill_fast_path(
     image_bgr,
     text_mask,
@@ -541,7 +527,6 @@ def run_inpaint_crop(
     crop_margin: int,
     resize_limit: int,
     pad_mod: int,
-    text_regions=None,
     crop_windows=None,
 ):
     np_module = _require_numpy()
@@ -554,8 +539,6 @@ def run_inpaint_crop(
     working_bubble_mask = None if bubble_mask is None else _to_mask_array(bubble_mask).copy()
 
     windows = list(crop_windows or [])
-    if not windows and text_regions:
-        windows = crop_windows_from_text_regions(text_regions, image.shape)
     if not windows:
         windows = boxes_from_mask(binary_mask)
 
@@ -624,7 +607,6 @@ __all__ = [
     "composite_masked",
     "crop_box",
     "crop_windows_from_bboxes",
-    "crop_windows_from_text_regions",
     "pad_to_modulo",
     "resize_max_side",
     "run_inpaint_crop",

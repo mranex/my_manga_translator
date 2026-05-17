@@ -20,7 +20,8 @@ except ModuleNotFoundError:
 
 from .strategy import (
     apply_bubble_fill_fast_path,
-    crop_windows_from_text_regions,
+    boxes_from_mask,
+    crop_windows_from_bboxes,
     run_inpaint_crop,
     run_inpaint_resize,
 )
@@ -508,7 +509,6 @@ class LamaMangaInpainter:
         image_bgr,
         text_mask,
         bubble_mask=None,
-        text_regions: list | None = None,
         crop_windows: list[tuple[int, int, int, int]] | None = None,
         *,
         require_loaded: bool = False,
@@ -527,7 +527,10 @@ class LamaMangaInpainter:
 
         windows = list(crop_windows or [])
         if not windows:
-            windows = crop_windows_from_text_regions(text_regions or [], image_bgr.shape)
+            windows = crop_windows_from_bboxes(
+                boxes_from_mask(binary_mask),
+                image_bgr.shape,
+            )
         max_side = max(image_bgr.shape[0], image_bgr.shape[1])
         if windows:
             output = run_inpaint_crop(
@@ -544,7 +547,6 @@ class LamaMangaInpainter:
                 crop_margin=self.crop_margin,
                 resize_limit=self.resize_limit,
                 pad_mod=self.pad_mod,
-                text_regions=text_regions,
                 crop_windows=windows,
             )
         elif max_side > self.crop_trigger_size:
@@ -562,7 +564,6 @@ class LamaMangaInpainter:
                 crop_margin=self.crop_margin,
                 resize_limit=self.resize_limit,
                 pad_mod=self.pad_mod,
-                text_regions=text_regions,
                 crop_windows=None,
             )
         elif max_side > self.resize_limit:
