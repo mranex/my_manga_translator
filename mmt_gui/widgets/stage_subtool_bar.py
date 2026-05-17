@@ -85,7 +85,7 @@ class StageSubToolBar(QFrame):
             group_layout.setSpacing(8)
             group_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            group_label = QLabel(group.title, group_frame)
+            group_label = QLabel(str(group.title).upper(), group_frame)
             group_label.setProperty("stageSubtoolGroupTitle", True)
             group_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
             group_layout.addWidget(group_label)
@@ -101,6 +101,11 @@ class StageSubToolBar(QFrame):
                 button.setFixedHeight(34)
                 group_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
                 button.show()
+                
+                # Force QSS to re-evaluate ancestor selectors (like QFrame#StageSubToolGroup)
+                button.style().unpolish(button)
+                button.style().polish(button)
+                
                 self._active_buttons.append(button)
 
             self.content_layout.addWidget(group_frame, 0, Qt.AlignmentFlag.AlignVCenter)

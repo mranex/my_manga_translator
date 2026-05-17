@@ -40,6 +40,7 @@ class CollapsibleSection(QFrame):
         self.badge_label.setVisible(False)
 
         header_row = QWidget()
+        header_row.setObjectName("CollapsibleHeaderRow")
         header_layout = QHBoxLayout(header_row)
         header_layout.setContentsMargins(12, 10, 12, 10)
         header_layout.setSpacing(10)
@@ -111,6 +112,7 @@ class StaticSection(QFrame):
         root_layout.setSpacing(10)
 
         header_row = QWidget()
+        header_row.setObjectName("CollapsibleHeaderRow")
         header_layout = QHBoxLayout(header_row)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(10)

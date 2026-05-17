@@ -18,7 +18,8 @@ def build_ocr_items_from_detection(
     """Build conservative OCR items from cached detection JSON.
 
     This intentionally keeps the logic simple for the milestone:
-    - one bubble OCR item per detected bubble
+    - one bubble OCR item per detected bubble using text-like layout regions as
+      the bubble OCR source
     - unmatched text regions become outside-text OCR items
     - text-like layout regions act as conservative fallbacks when they do not
       strongly overlap existing OCR candidates
@@ -75,31 +76,34 @@ def build_ocr_items_from_detection(
                     f"for bubble {bubble_id}: outside bubble bbox."
                 )
         matched_text_regions = filtered_text_regions
+        matched_layout_regions = _layout_regions_for_bubble(layout_regions, bubble_bbox, image_shape)
 
         refined_bbox = union_bboxes(
             (
-                clamp_bbox_to_image(text_region.get("bbox"), image_shape)
-                for text_region in matched_text_regions
+                clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
+                for layout_region in matched_layout_regions
             ),
             image_shape,
         )
         if refined_bbox is not None:
-            candidate_ocr_bbox = expand_bbox(refined_bbox, image_shape, 24)
-            ocr_bbox = intersect_bboxes(candidate_ocr_bbox, bubble_bbox, image_shape)
+            ocr_bbox = intersect_bboxes(refined_bbox, bubble_bbox, image_shape)
             if ocr_bbox is None:
                 ocr_bbox = bubble_bbox
-            elif ocr_bbox != candidate_ocr_bbox and logger is not None:
+            elif ocr_bbox != refined_bbox and logger is not None:
                 logger(f"[ocr_items] Clipped bubble OCR bbox to bubble bbox for bubble {bubble_id}.")
         else:
             ocr_bbox = bubble_bbox
-        reading_order = _min_reading_order(matched_text_regions)
+        reading_order = _min_reading_order(matched_layout_regions) or _min_reading_order(matched_text_regions)
         source_direction = _first_non_empty(
+            [layout_region.get("source_direction") for layout_region in matched_layout_regions]
+        ) or _first_non_empty(
             [text_region.get("source_direction") for text_region in matched_text_regions]
         ) or infer_source_direction(ocr_bbox)
 
         detector_sources = unique_strings(
             [
                 bubble.get("detector"),
+                *[layout_region.get("detector") for layout_region in matched_layout_regions],
                 *[text_region.get("detector") for text_region in matched_text_regions],
             ]
         )
@@ -115,6 +119,10 @@ def build_ocr_items_from_detection(
                 "reading_order": reading_order,
                 "detector_sources": detector_sources,
                 "source_direction": source_direction,
+                "layout_region_ids": _region_ids(matched_layout_regions),
+                "text_region_ids": _region_ids(matched_text_regions),
+                "ocr_bbox_source": "layout_region",
+                "ocr_bbox_source_color": "purple",
                 "text": "",
                 "status": "prepared",
             }
@@ -434,16 +442,52 @@ def text_region_belongs_to_bubble(
     text_bbox: tuple[int, int, int, int],
     bubble_bbox: tuple[int, int, int, int],
 ) -> bool:
-    center_x = (float(text_bbox[0]) + float(text_bbox[2])) / 2.0
-    center_y = (float(text_bbox[1]) + float(text_bbox[3])) / 2.0
+    return region_belongs_to_bubble(text_bbox, bubble_bbox)
+
+
+def region_belongs_to_bubble(
+    region_bbox: tuple[int, int, int, int],
+    bubble_bbox: tuple[int, int, int, int],
+) -> bool:
+    center_x = (float(region_bbox[0]) + float(region_bbox[2])) / 2.0
+    center_y = (float(region_bbox[1]) + float(region_bbox[3])) / 2.0
     if (
         float(bubble_bbox[0]) <= center_x <= float(bubble_bbox[2])
         and float(bubble_bbox[1]) <= center_y <= float(bubble_bbox[3])
     ):
         return True
 
-    text_area = max(1, bbox_area(text_bbox))
-    return (bbox_intersection_area(text_bbox, bubble_bbox) / float(text_area)) >= 0.50
+    region_area = max(1, bbox_area(region_bbox))
+    return (bbox_intersection_area(region_bbox, bubble_bbox) / float(region_area)) >= 0.50
+
+
+def _layout_regions_for_bubble(
+    layout_regions: Sequence[dict[str, Any]],
+    bubble_bbox: tuple[int, int, int, int],
+    image_shape: Sequence[int],
+) -> list[dict[str, Any]]:
+    matched_regions: list[dict[str, Any]] = []
+    for layout_region in layout_regions:
+        label = str(layout_region.get("label") or "").strip().lower()
+        if not is_text_like_layout_label(label):
+            continue
+        layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
+        if layout_bbox is None:
+            continue
+        if not region_belongs_to_bubble(layout_bbox, bubble_bbox):
+            continue
+        matched_regions.append(layout_region)
+    return matched_regions
+
+
+def _region_ids(regions: Sequence[dict[str, Any]]) -> list[int]:
+    region_ids: list[int] = []
+    for region in regions:
+        region_id = _coerce_optional_int(region.get("id"))
+        if region_id is None:
+            continue
+        region_ids.append(region_id)
+    return region_ids
 
 
 def crop_image_to_bbox(image: Any, bbox: Sequence[int | float]) -> Any:
@@ -531,6 +575,7 @@ __all__ = [
     "intersect_bboxes",
     "is_text_like_layout_label",
     "overlap_ratio_against_many",
+    "region_belongs_to_bubble",
     "sort_key_for_region",
     "text_region_belongs_to_bubble",
     "union_bboxes",

@@ -17,15 +17,15 @@ from PyQt6.QtWidgets import (
 )
 
 STAGE_ORDER = (
-    ("process", "Process", QStyle.StandardPixmap.SP_BrowserReload),
-    ("project", "Project", QStyle.StandardPixmap.SP_DirIcon),
-    ("config", "Config", QStyle.StandardPixmap.SP_FileDialogDetailedView),
-    ("detection", "Detection", QStyle.StandardPixmap.SP_FileDialogContentsView),
-    ("ocr", "OCR", QStyle.StandardPixmap.SP_FileIcon),
-    ("translation", "Translation", QStyle.StandardPixmap.SP_MessageBoxInformation),
-    ("inpaint", "Inpaint", QStyle.StandardPixmap.SP_ToolBarHorizontalExtensionButton),
-    ("render", "Render", QStyle.StandardPixmap.SP_DesktopIcon),
-    ("export", "Export", QStyle.StandardPixmap.SP_DialogSaveButton),
+    ("project", "Project", "❖"),
+    ("detection", "Detection", "⌖"),
+    ("ocr", "OCR", "▤"),
+    ("translation", "Translation", "⟠"),
+    ("inpaint", "Inpaint", "▨"),
+    ("render", "Render", "◈"),
+    ("export", "Export", "⇲"),
+    ("process", "Process", "⚡"),
+    ("config", "Config", "⚙"),
 )
 
 def get_colorized_icon(style: QStyle, icon_enum: QStyle.StandardPixmap, color_hex: str = "#8a8a9e") -> QIcon:
@@ -62,38 +62,41 @@ class StageTabButton(QPushButton):
         
         if is_active:
             bg_color = QColor("#1e1033") if is_dark else QColor("#f3e8ff")
-            border_color = QColor("#9d4edd") if is_dark else QColor("#9333ea")
         elif is_hover:
             bg_color = QColor("#1f1f2e") if is_dark else QColor("#f1f5f9")
-            border_color = QColor("#ffd60a") if is_dark else QColor("#fbbf24")
         else:
             bg_color = QColor("#111116") if is_dark else QColor("#ffffff")
-            border_color = QColor("#2c2c36") if is_dark else QColor("#e2e8f0")
             
-        painter.setBrush(bg_color)
-        painter.setPen(QPen(border_color, 2 if is_active or is_hover else 1))
-        painter.drawPath(path)
-        
         status = self.property("stageStatus")
+        from .stage_status import normalize_stage_status, status_gradient_colors
+        from PyQt6.QtGui import QLinearGradient
+        
         if status and status != "missing":
-            from .stage_status import normalize_stage_status, status_gradient_colors
-            from PyQt6.QtGui import QLinearGradient
             norm_status = normalize_stage_status(status)
             start_color, end_color = status_gradient_colors(norm_status)
-            grad = QLinearGradient(0, h - 4, w, h - 4)
-            grad.setColorAt(0, QColor(start_color))
-            grad.setColorAt(1, QColor(end_color))
+            border_brush = QLinearGradient(0, 0, w, 0)
+            border_brush.setColorAt(0, QColor(start_color))
+            border_brush.setColorAt(1, QColor(end_color))
+        else:
+            border_brush = QColor("#2c2c36") if is_dark else QColor("#e2e8f0")
             
-            line_path = QPainterPath()
-            line_path.moveTo(slant + 1, h - 4)
-            line_path.lineTo(w - 1, h - 4)
-            line_path.lineTo(w - slant - 1, h)
-            line_path.lineTo(1, h)
-            line_path.closeSubpath()
-            painter.setBrush(grad)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPath(line_path)
-
+        painter.setBrush(bg_color)
+        pen_width = 4 if is_active else (3 if is_hover else 2)
+        pen = QPen(border_brush, pen_width)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
+        
+        # Inset the path to prevent the thick border from being clipped
+        inset = pen_width / 2.0
+        path = QPainterPath()
+        path.moveTo(slant + inset, inset)
+        path.lineTo(w - inset, inset)
+        path.lineTo(w - slant - inset, h - inset)
+        path.lineTo(inset, h - inset)
+        path.closeSubpath()
+        
+        painter.drawPath(path)
+        
         painter.end()
         super().paintEvent(event)
 
@@ -113,23 +116,21 @@ class WorkflowTabs(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 4)
-        layout.setSpacing(8)
+        layout.setSpacing(-22)
 
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
         self.stage_rows: dict[str, QPushButton] = {}
         self._glow_effects: dict[str, QGraphicsDropShadowEffect] = {}
 
-        for stage_key, stage_label, icon_enum in STAGE_ORDER:
+        for stage_key, stage_label, icon_char in STAGE_ORDER:
             tab_container = QWidget(self)
             tab_container.setObjectName("WorkflowTabContainer")
             tab_layout = QVBoxLayout(tab_container)
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.setSpacing(0)
 
-            button = StageTabButton(stage_label, tab_container)
-            colorized = get_colorized_icon(self.style(), icon_enum)
-            button.setIcon(colorized)
+            button = StageTabButton(f"{icon_char}  {stage_label.upper()}", tab_container)
             button.setCheckable(True)
             button.setProperty("folderTab", True)
             button.setToolTip(stage_label)
@@ -142,6 +143,7 @@ class WorkflowTabs(QFrame):
             font = button.font()
             font.setFamily("Orbitron")
             font.setPointSize(11)
+            font.setWeight(font.Weight.Bold)
             button.setFont(font)
             button.clicked.connect(lambda checked=False, key=stage_key: self._emit_stage_selected(key))
 
@@ -174,6 +176,11 @@ class WorkflowTabs(QFrame):
                 button.style().unpolish(button)
                 button.style().polish(button)
                 self._update_button_glow(key, active=is_active)
+                
+                if is_active:
+                    container = button.parentWidget()
+                    if container:
+                        container.raise_()
         finally:
             self._suppress_emits = False
 

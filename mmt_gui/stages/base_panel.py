@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from mmt_gui.widgets.stage_status import StatusLabel
 
@@ -12,11 +12,15 @@ class StagePanel(QScrollArea):
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.setMinimumHeight(0)
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
 
         container = QFrame()
         container.setObjectName("StagePanel")
+        container.setMinimumHeight(0)
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         root_layout = QVBoxLayout(container)
         root_layout.setContentsMargins(18, 18, 18, 18)
         root_layout.setSpacing(14)

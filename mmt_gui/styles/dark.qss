@@ -50,21 +50,24 @@ QFrame#StageSubToolGroup {
     border-radius: 0px;
 }
 
+QWidget#EditorBodyWidget,
+QWidget#TextItemEditorWidget,
+QWidget#CropPreviewPanel {
+    background: transparent;
+}
+
 QLabel[stageSubtoolStageTitle="true"] {
     color: #8a8a9e;
     font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
     font-size: 9pt;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
 }
 
 QLabel[stageSubtoolGroupTitle="true"] {
     color: #cbd5e1;
     font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
-    font-size: 8.5pt;
-    font-weight: 600;
-    text-transform: uppercase;
+    font-size: 9pt;
+    font-weight: 900;
 }
 
 QFrame#StageSubToolSeparator {
@@ -114,8 +117,6 @@ QLabel[role="title"] {
     font-size: 16pt;
     font-weight: 700;
     color: #ffffff;
-    text-transform: uppercase;
-    letter-spacing: 1px;
 }
 
 QLabel[role="sectionTitle"] {
@@ -123,7 +124,6 @@ QLabel[role="sectionTitle"] {
     font-size: 11pt;
     font-weight: 600;
     color: #e5e7eb;
-    text-transform: uppercase;
 }
 
 QLabel[sectionBadge="true"] {
@@ -311,35 +311,39 @@ QToolButton[leftToolButton="true"] {
     min-height: 30px;
     padding: 6px 6px;
     border-radius: 0px;
-    border-top: 1px solid #3c3c4a;
+    border: none;
+    border-left: 3px solid #3f3f5a;
     border-bottom: 1px solid #111116;
-    border-left: 1px solid #2c2c36;
-    border-right: 1px solid #2c2c36;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1a24, stop:1 #0a0a0c);
-    color: #e5e7eb;
-    font-weight: 600;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1a24, stop:1 #0a0a0c);
+    color: #cbd5e1;
+    font-weight: bold;
 }
 
 QToolButton[leftToolButton="true"]:hover {
-    border-top: 1px solid #7c3aed;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2b1c4d, stop:1 #130a24);
+    border-left: 3px solid #ffd60a;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2b1c4d, stop:1 #0a0a0c);
     color: #ffffff;
 }
 
 QToolButton[leftToolButton="true"]:checked {
-    border-color: #ffd60a;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332b0b, stop:1 #1a1505);
-    color: #ffd60a;
+    border-left: 3px solid #00f2fe;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10334a, stop:1 #0a0a0c);
+    color: #00f2fe;
+}
+
+QToolButton[leftToolButton="true"]:pressed {
+    border-left: 3px solid #00f2fe;
+    background: #10334a;
 }
 
 QToolButton[leftToolButton="true"][hasAlert="true"] {
-    border-color: #f59e0b;
+    border-left-color: #f59e0b;
 }
 
 QToolButton[leftToolButton="true"][hasErrorAlert="true"] {
-    border-color: #f43f5e;
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4c1122, stop:1 #260811);
-    color: #fff1f2;
+    border-left-color: #ff0844;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4c1122, stop:1 #0a0a0c);
+    color: #ffb199;
 }
 
 QFrame#LeftToolBar QComboBox,
@@ -350,10 +354,35 @@ QFrame#LeftToolBar QCheckBox {
 QFrame#LeftToolBar QComboBox {
     min-height: 28px;
     padding-left: 8px;
+    border: 1px solid #2c2c36;
+    border-radius: 0px;
+    background: #0a0a0c;
+    color: #e5e7eb;
+}
+
+QFrame#LeftToolBar QComboBox:hover {
+    border-color: #9d4edd;
 }
 
 QFrame#LeftToolBar QCheckBox {
     color: #e5e7eb;
+}
+
+QFrame#LeftToolBar QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #3f3f5a;
+    background: #0a0a0c;
+    border-radius: 0px;
+}
+
+QFrame#LeftToolBar QCheckBox::indicator:hover {
+    border-color: #ffd60a;
+}
+
+QFrame#LeftToolBar QCheckBox::indicator:checked {
+    background: #00f2fe;
+    border-color: #00f2fe;
 }
 
 QListWidget#PageFilmstripList {
@@ -478,40 +507,6 @@ QProgressBar::chunk {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8b5cf6, stop:1 #06b6d4);
     border-radius: 0px;
 }
-
-QSplitter::handle {
-    background: #2c2c36;
-    border-radius: 0px;
-}
-
-QScrollBar:vertical,
-QScrollBar:horizontal {
-    background: transparent;
-    border: none;
-    margin: 2px;
-}
-
-QScrollBar::handle:vertical,
-QScrollBar::handle:horizontal {
-    background: #3c3c4a;
-    border-radius: 0px;
-    min-height: 24px;
-    min-width: 24px;
-}
-
-QScrollBar::handle:vertical:hover,
-QScrollBar::handle:horizontal:hover {
-    background: #6b21a8;
-}
-
-QScrollBar::add-line,
-QScrollBar::sub-line,
-QScrollBar::add-page,
-QScrollBar::sub-page {
-    background: transparent;
-    border: none;
-}
-
 QListWidget#PageFilmstripList QScrollBar:horizontal {
     background: rgba(10, 10, 12, 0.6);
     border: 1px solid #1a1a24;
@@ -589,4 +584,122 @@ QSplitter::handle:vertical {
 QFrame[card="true"]:hover, QGroupBox:hover {
     border: 1px solid #9d4edd;
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1a1a24, stop:1 #2d1b4e);
+}
+
+/* --- Stage SubToolBar Styles --- */
+QFrame#StageSubToolBar {
+    background: #0a0a0c;
+    border: none;
+    border-bottom: 1px solid #2c2c36;
+}
+
+QFrame#StageSubToolGroup {
+    background: transparent;
+}
+
+QLabel[stageSubtoolGroupTitle="true"] {
+    color: #cbd5e1;
+    font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
+    font-size: 9pt;
+    font-weight: 900;
+}
+
+QFrame#StageSubToolGroup QPushButton,
+QFrame#StageSubToolGroup QPushButton[variant="primary"],
+QFrame#StageSubToolGroup QPushButton[variant="secondary"],
+QFrame#StageSubToolGroup QPushButton[variant="rerun"],
+QFrame#StageSubToolGroup QPushButton[variant="danger"] {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a1a24, stop:1 #111116);
+    border: none;
+    border-top: 1px solid #3d1c63;
+    border-bottom: 1px solid #3d1c63;
+    border-right: 1px solid #3d1c63;
+    border-left: 3px solid #9d4edd;
+    color: #e5e7eb;
+    padding: 5px 15px;
+    font-weight: bold;
+    border-radius: 0px;
+}
+
+QFrame#StageSubToolGroup QPushButton:hover,
+QFrame#StageSubToolGroup QPushButton[variant="primary"]:hover,
+QFrame#StageSubToolGroup QPushButton[variant="secondary"]:hover,
+QFrame#StageSubToolGroup QPushButton[variant="rerun"]:hover,
+QFrame#StageSubToolGroup QPushButton[variant="danger"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3d1c63, stop:1 #211333);
+    border-top: 1px solid #9d4edd;
+    border-bottom: 1px solid #9d4edd;
+    border-right: 1px solid #9d4edd;
+    border-left: 3px solid #ffd60a;
+    color: #ffffff;
+}
+
+QFrame#StageSubToolGroup QPushButton:pressed,
+QFrame#StageSubToolGroup QPushButton[variant="primary"]:pressed,
+QFrame#StageSubToolGroup QPushButton[variant="secondary"]:pressed,
+QFrame#StageSubToolGroup QPushButton[variant="rerun"]:pressed,
+QFrame#StageSubToolGroup QPushButton[variant="danger"]:pressed {
+    background: #ffd60a;
+    color: #000000;
+    border-top: 1px solid #d97706;
+    border-bottom: 1px solid #d97706;
+    border-right: 1px solid #d97706;
+    border-left: 3px solid #000000;
+}
+
+QFrame#StageSubToolSeparator {
+    background: #2c2c36;
+    width: 1px;
+}
+
+/* Wibu High-Tech Typography & Transparent Backgrounds */
+QLabel[role="sectionTitle"],
+QWidget#CollapsibleHeaderRow {
+    background-color: transparent;
+    font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
+    font-size: 10pt;
+    font-weight: 800;
+}
+
+/* Wibu High-Tech "Dangerous" Process Buttons */
+QPushButton[variant="danger_primary"] {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7f1d1d, stop:1 #b91c1c);
+    color: #fca5a5;
+    border: 1px solid #ef4444;
+    border-left: 3px solid #ff2a2a;
+    border-radius: 0px;
+    font-weight: bold;
+    padding: 6px 12px;
+}
+
+QPushButton[variant="danger_primary"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #991b1b, stop:1 #dc2626);
+    color: #ffffff;
+    border: 1px solid #ff5555;
+    border-left: 3px solid #ff2a2a;
+}
+
+QPushButton[variant="danger_primary"]:pressed {
+    background: #7f1d1d;
+    border: 1px solid #ef4444;
+}
+
+QPushButton[variant="danger_rerun"] {
+    background: #2a1111;
+    color: #fca5a5;
+    border: 1px dashed #ef4444;
+    border-radius: 0px;
+    font-weight: bold;
+    padding: 6px 12px;
+}
+
+QPushButton[variant="danger_rerun"]:hover {
+    background: #3f1616;
+    color: #ffffff;
+    border: 1px dashed #ff5555;
+}
+
+QPushButton[variant="danger_rerun"]:pressed {
+    background: #1f0b0b;
+    border: 1px dashed #b91c1c;
 }

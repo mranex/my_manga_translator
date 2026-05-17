@@ -11,12 +11,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
-    QVBoxLayout,
-    QWidget,
 )
 
 from mmt_core import PROCESS_PIPELINE_STEPS
-from mmt_gui.widgets import CollapsibleSection
+from mmt_gui.widgets import CollapsibleSection, StaticSection
 from mmt_gui.widgets.settings_card import style_button
 from mmt_gui.widgets.stage_status import StatusLabel
 
@@ -31,46 +29,58 @@ class ProcessPanel(StagePanel):
     process_chapter_requested = pyqtSignal()
     reprocess_chapter_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
+    detect_all_requested = pyqtSignal()
+    redetect_all_requested = pyqtSignal()
+    prepare_ocr_all_requested = pyqtSignal()
+    reprepare_ocr_all_requested = pyqtSignal()
+    run_ocr_all_requested = pyqtSignal()
+    rerun_ocr_all_requested = pyqtSignal()
+    initialize_translation_all_requested = pyqtSignal()
+    reinitialize_translation_all_requested = pyqtSignal()
+    translate_all_requested = pyqtSignal()
+    retranslate_all_requested = pyqtSignal()
+    prepare_mask_all_requested = pyqtSignal()
+    reprepare_mask_all_requested = pyqtSignal()
+    inpaint_all_requested = pyqtSignal()
+    reinpaint_all_requested = pyqtSignal()
+    prepare_render_all_requested = pyqtSignal()
+    reprepare_render_all_requested = pyqtSignal()
+    render_all_requested = pyqtSignal()
+    rerender_all_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Process", parent)
         self._actions_enabled = True
         self._step_labels: dict[str, StatusLabel] = {}
 
-        actions_card = CollapsibleSection("One-click Process", expanded=True)
+        actions_card = StaticSection("Process Current Page", expanded=True)
         self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)
         actions_layout.setVerticalSpacing(8)
 
-        current_label = QLabel("Current Page")
+        current_label = QLabel("Normal")
         current_label.setProperty("role", "muted")
         actions_layout.addWidget(current_label, 0, 0)
 
         self.process_current_button = QPushButton("Process Current Page")
-        style_button(self.process_current_button, "primary")
+        style_button(self.process_current_button, "danger_primary")
         self.process_current_button.clicked.connect(self.process_current_requested.emit)
         actions_layout.addWidget(self.process_current_button, 0, 1)
 
+        rerun_label = QLabel("Re-run / Force")
+        rerun_label.setProperty("role", "muted")
+        actions_layout.addWidget(rerun_label, 1, 0)
+
         self.reprocess_current_button = QPushButton("Re-process Current Page")
-        style_button(self.reprocess_current_button, "rerun")
+        style_button(self.reprocess_current_button, "danger_rerun")
         self.reprocess_current_button.clicked.connect(self.reprocess_current_requested.emit)
-        actions_layout.addWidget(self.reprocess_current_button, 0, 2)
+        actions_layout.addWidget(self.reprocess_current_button, 1, 1)
 
-        chapter_label = QLabel("Chapter")
-        chapter_label.setProperty("role", "muted")
-        actions_layout.addWidget(chapter_label, 1, 0)
-
-        self.process_chapter_button = QPushButton("Process Chapter")
-        style_button(self.process_chapter_button, "primary")
-        self.process_chapter_button.clicked.connect(self.process_chapter_requested.emit)
-        actions_layout.addWidget(self.process_chapter_button, 1, 1)
-
-        self.reprocess_chapter_button = QPushButton("Re-process Chapter")
-        style_button(self.reprocess_chapter_button, "rerun")
-        self.reprocess_chapter_button.clicked.connect(self.reprocess_chapter_requested.emit)
-        actions_layout.addWidget(self.reprocess_chapter_button, 1, 2)
+        control_label = QLabel("Control")
+        control_label.setProperty("role", "muted")
+        actions_layout.addWidget(control_label, 2, 0)
 
         self.stop_process_button = QPushButton("Stop Process")
         style_button(self.stop_process_button, "danger")
@@ -78,13 +88,115 @@ class ProcessPanel(StagePanel):
         self.stop_process_button.setEnabled(False)
         actions_layout.addWidget(self.stop_process_button, 2, 1)
 
+        actions_card.content_layout.addLayout(actions_layout)
+        self.content_layout.addWidget(actions_card)
+
+        chapter_card = StaticSection("Full Chapter", expanded=True)
+        chapter_layout = QGridLayout()
+        chapter_layout.setContentsMargins(0, 0, 0, 0)
+        chapter_layout.setHorizontalSpacing(8)
+        chapter_layout.setVerticalSpacing(8)
+
+        chapter_label = QLabel("Normal")
+        chapter_label.setProperty("role", "muted")
+        chapter_layout.addWidget(chapter_label, 0, 0)
+
+        self.process_chapter_button = QPushButton("Process Chapter")
+        style_button(self.process_chapter_button, "danger_primary")
+        self.process_chapter_button.clicked.connect(self.process_chapter_requested.emit)
+        chapter_layout.addWidget(self.process_chapter_button, 0, 1)
+
+        chapter_rerun_label = QLabel("Re-run / Force")
+        chapter_rerun_label.setProperty("role", "muted")
+        chapter_layout.addWidget(chapter_rerun_label, 1, 0)
+
+        self.reprocess_chapter_button = QPushButton("Re-process Chapter")
+        style_button(self.reprocess_chapter_button, "danger_rerun")
+        self.reprocess_chapter_button.clicked.connect(self.reprocess_chapter_requested.emit)
+        chapter_layout.addWidget(self.reprocess_chapter_button, 1, 1)
+
         self.cancel_note_label = QLabel("Process uses cooperative cancellation and stops at the next safe point.")
         self.cancel_note_label.setWordWrap(True)
         self.cancel_note_label.setProperty("role", "muted")
-        actions_layout.addWidget(self.cancel_note_label, 3, 0, 1, 3)
+        chapter_layout.addWidget(self.cancel_note_label, 2, 0, 1, 2)
 
-        actions_card.content_layout.addLayout(actions_layout)
-        self.content_layout.addWidget(actions_card)
+        chapter_card.content_layout.addLayout(chapter_layout)
+        self.content_layout.addWidget(chapter_card)
+
+        self.detect_all_button, self.redetect_all_button = self._add_batch_section(
+            "Batch Detection",
+            normal_label="Normal",
+            normal_buttons=(("Detect All", self.detect_all_requested),),
+            rerun_buttons=(("Re-detect All", self.redetect_all_requested),),
+        )
+        (
+            self.prepare_ocr_all_button,
+            self.run_ocr_all_button,
+            self.reprepare_ocr_all_button,
+            self.rerun_ocr_all_button,
+        ) = self._add_batch_section(
+            "Batch OCR",
+            normal_label="Normal",
+            normal_buttons=(
+                ("Prepare OCR All", self.prepare_ocr_all_requested),
+                ("Run OCR All", self.run_ocr_all_requested),
+            ),
+            rerun_buttons=(
+                ("Re-prepare OCR All", self.reprepare_ocr_all_requested),
+                ("Re-run OCR All", self.rerun_ocr_all_requested),
+            ),
+        )
+        (
+            self.initialize_translation_all_button,
+            self.translate_all_button,
+            self.reinitialize_translation_all_button,
+            self.retranslate_all_button,
+        ) = self._add_batch_section(
+            "Batch Translation",
+            normal_label="Normal",
+            normal_buttons=(
+                ("Initialize Translation All", self.initialize_translation_all_requested),
+                ("Translate All", self.translate_all_requested),
+            ),
+            rerun_buttons=(
+                ("Re-initialize Translation All", self.reinitialize_translation_all_requested),
+                ("Re-translate All", self.retranslate_all_requested),
+            ),
+        )
+        (
+            self.prepare_mask_all_button,
+            self.inpaint_all_button,
+            self.reprepare_mask_all_button,
+            self.reinpaint_all_button,
+        ) = self._add_batch_section(
+            "Batch Inpaint",
+            normal_label="Normal",
+            normal_buttons=(
+                ("Prepare Mask All", self.prepare_mask_all_requested),
+                ("Inpaint All", self.inpaint_all_requested),
+            ),
+            rerun_buttons=(
+                ("Re-prepare Mask All", self.reprepare_mask_all_requested),
+                ("Re-inpaint All", self.reinpaint_all_requested),
+            ),
+        )
+        (
+            self.prepare_render_all_button,
+            self.render_all_button,
+            self.reprepare_render_all_button,
+            self.rerender_all_button,
+        ) = self._add_batch_section(
+            "Batch Render",
+            normal_label="Normal",
+            normal_buttons=(
+                ("Prepare Render All", self.prepare_render_all_requested),
+                ("Render All", self.render_all_requested),
+            ),
+            rerun_buttons=(
+                ("Re-prepare Render All", self.reprepare_render_all_requested),
+                ("Re-render All", self.rerender_all_requested),
+            ),
+        )
 
         summary_card = CollapsibleSection("Settings Summary", expanded=True)
         self.settings_note_label = QLabel("Process uses the current workflow settings from Config.")
@@ -177,6 +289,24 @@ class ProcessPanel(StagePanel):
             self.reprocess_current_button,
             self.process_chapter_button,
             self.reprocess_chapter_button,
+            self.detect_all_button,
+            self.redetect_all_button,
+            self.prepare_ocr_all_button,
+            self.reprepare_ocr_all_button,
+            self.run_ocr_all_button,
+            self.rerun_ocr_all_button,
+            self.initialize_translation_all_button,
+            self.reinitialize_translation_all_button,
+            self.translate_all_button,
+            self.retranslate_all_button,
+            self.prepare_mask_all_button,
+            self.reprepare_mask_all_button,
+            self.inpaint_all_button,
+            self.reinpaint_all_button,
+            self.prepare_render_all_button,
+            self.reprepare_render_all_button,
+            self.render_all_button,
+            self.rerender_all_button,
         ):
             widget.setEnabled(bool(enabled))
 
@@ -268,6 +398,45 @@ class ProcessPanel(StagePanel):
     def set_done_summary(self, message: str | None) -> None:
         normalized = str(message or "").strip()
         self.done_summary_value.setText(normalized or "-")
+
+    def _add_batch_section(
+        self,
+        title: str,
+        *,
+        normal_label: str,
+        normal_buttons: tuple[tuple[str, pyqtSignal], ...],
+        rerun_buttons: tuple[tuple[str, pyqtSignal], ...],
+    ) -> tuple[QPushButton, ...]:
+        section = StaticSection(title, expanded=True)
+        layout = QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+
+        normal_title = QLabel(normal_label)
+        normal_title.setProperty("role", "muted")
+        layout.addWidget(normal_title, 0, 0)
+        created_buttons: list[QPushButton] = []
+        for index, (label, signal) in enumerate(normal_buttons, start=1):
+            button = QPushButton(label)
+            style_button(button, "danger_primary")
+            button.clicked.connect(signal.emit)
+            layout.addWidget(button, 0, index)
+            created_buttons.append(button)
+
+        rerun_title = QLabel("Re-run / Force")
+        rerun_title.setProperty("role", "muted")
+        layout.addWidget(rerun_title, 1, 0)
+        for index, (label, signal) in enumerate(rerun_buttons, start=1):
+            button = QPushButton(label)
+            style_button(button, "danger_rerun")
+            button.clicked.connect(signal.emit)
+            layout.addWidget(button, 1, index)
+            created_buttons.append(button)
+
+        section.content_layout.addLayout(layout)
+        self.content_layout.addWidget(section)
+        return tuple(created_buttons)
 
 
 __all__ = ["ProcessPanel"]

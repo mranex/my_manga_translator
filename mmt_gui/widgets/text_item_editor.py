@@ -19,6 +19,7 @@ class TextItemEditorWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("TextItemEditorWidget")
         self._loaded_text = ""
         self._suppress_dirty_signal = False
 

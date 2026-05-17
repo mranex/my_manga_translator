@@ -21,6 +21,7 @@ from .ocr_items import (
     is_huge_bbox,
     is_text_like_layout_label,
     overlap_ratio_against_many,
+    region_belongs_to_bubble,
     sort_key_for_region,
     text_region_belongs_to_bubble,
 )
@@ -994,6 +995,10 @@ def _build_active_canon_item(
         bubble_id = _coerce_optional_int(workflow_item.get("bubble_id"))
         detector_refs["bubble_id"] = bubble_id
         matched_bubble = _find_by_id(bubbles, bubble_id)
+        workflow_layout_region_ids = _coerce_int_list(workflow_item.get("layout_region_ids"))
+        detector_refs["layout_region_ids"] = workflow_layout_region_ids
+        if workflow_layout_region_ids and not suppressed:
+            used_layout_region_ids.update(workflow_layout_region_ids)
         matched_text_regions = [
             region
             for region in text_regions
@@ -1025,6 +1030,10 @@ def _build_active_canon_item(
                 matched_bubble,
                 exclude_keys={"id", "bbox", "manual", "excluded", "source"},
             )
+        if workflow_item.get("ocr_bbox_source"):
+            metadata["ocr_bbox_source"] = str(workflow_item.get("ocr_bbox_source") or "")
+        if workflow_item.get("ocr_bbox_source_color"):
+            metadata["ocr_bbox_source_color"] = str(workflow_item.get("ocr_bbox_source_color") or "")
         text_mask_bboxes = _clipped_bboxes_from_detection_regions(
             matched_text_regions,
             clip_bbox=bbox,

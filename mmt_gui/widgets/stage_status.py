@@ -7,16 +7,16 @@ from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QLabel, QWidget
 
 STATUS_COLORS = {
-    "missing": "#7d8aa5",
-    "ready": "#f59e0b",
-    "done": "#27b26b",
-    "error": "#e24b5c",
+    "missing": "#3f3f5a",
+    "ready": "#ffd60a",
+    "done": "#00f2fe",
+    "error": "#ff0844",
 }
 STATUS_LINE_GRADIENTS = {
-    "missing": ("#f8fafc", "#94a3b8"),
-    "ready": ("#facc15", "#f97316"),
-    "done": ("#22c55e", "#06b6d4"),
-    "error": ("#ef4444", "#d946ef"),
+    "missing": ("#2c2c36", "#3f3f5a"),
+    "ready": ("#ffd60a", "#ff9f0a"),
+    "done": ("#00f2fe", "#4facfe"),
+    "error": ("#ff0844", "#ffb199"),
 }
 STATUS_ALIASES = {
     "untouched": "missing",

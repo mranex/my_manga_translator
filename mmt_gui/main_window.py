@@ -325,6 +325,7 @@ class MainWindow(QMainWindow):
 
         self.image_preview = ImagePreviewWidget()
         self.image_preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_preview.setMinimumHeight(0)
         self.left_toolbar.fit_requested.connect(self.image_preview.fit_to_view)
         self.left_toolbar.zoom_in_requested.connect(self.image_preview.zoom_in)
         self.left_toolbar.zoom_out_requested.connect(self.image_preview.zoom_out)
@@ -332,6 +333,7 @@ class MainWindow(QMainWindow):
 
         preview_frame = QFrame()
         preview_frame.setObjectName("PreviewSurface")
+        preview_frame.setMinimumHeight(0)
         preview_layout = QVBoxLayout(preview_frame)
         preview_layout.setContentsMargins(8, 8, 8, 8)
         preview_layout.setSpacing(0)
@@ -363,6 +365,7 @@ class MainWindow(QMainWindow):
         self.translation_panel.items_table.itemSelectionChanged.connect(self._refresh_stage_statuses)
 
         self.stage_stack = QStackedWidget()
+        self.stage_stack.setMinimumHeight(0)
         self.stage_panels: dict[str, QWidget] = {
             "process": self.process_panel,
             "project": self.project_panel,
@@ -383,6 +386,7 @@ class MainWindow(QMainWindow):
         self.ocr_panel.set_server_values(self.llama_server_manager)
 
         self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._content_splitter.setMinimumHeight(0)
         self._content_splitter.addWidget(preview_frame)
         self._content_splitter.addWidget(self.stage_stack)
         self._content_splitter.setStretchFactor(0, 1)
@@ -390,9 +394,11 @@ class MainWindow(QMainWindow):
         self._content_splitter.setSizes(list(DEFAULT_CONTENT_SPLITTER_SIZES))
 
         body_widget = QWidget()
+        body_widget.setMinimumHeight(0)
         body_layout = QHBoxLayout(body_widget)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(10)
+        self.left_toolbar.setMinimumHeight(0)
         body_layout.addWidget(self.left_toolbar)
         body_layout.addWidget(self._content_splitter, 1)
 
@@ -426,7 +432,7 @@ class MainWindow(QMainWindow):
         self._workspace_splitter.addWidget(body_widget)
         self._workspace_splitter.addWidget(self.page_filmstrip)
         self._workspace_splitter.setStretchFactor(0, 1)
-        self._workspace_splitter.setStretchFactor(1, 0)
+        self._workspace_splitter.setStretchFactor(1, 1)
         self._workspace_splitter.setCollapsible(0, False)
         self._workspace_splitter.setCollapsible(1, False)
         self._workspace_splitter.setSizes(list(DEFAULT_WORKSPACE_SPLITTER_SIZES))
@@ -487,23 +493,7 @@ class MainWindow(QMainWindow):
 
     def _configure_stage_subtool_bar(self) -> None:
         self._stage_subtool_groups = {
-            "process": [
-                StageToolGroup(
-                    "Normal",
-                    [
-                        self._stage_tool_button(self.process_panel.process_current_button),
-                        self._stage_tool_button(self.process_panel.process_chapter_button),
-                    ],
-                ),
-                StageToolGroup(
-                    "Re-run / Force",
-                    [
-                        self._stage_tool_button(self.process_panel.reprocess_current_button),
-                        self._stage_tool_button(self.process_panel.reprocess_chapter_button),
-                    ],
-                ),
-                StageToolGroup("Control", [self._stage_tool_button(self.process_panel.stop_process_button)]),
-            ],
+            "process": [],
             "project": [
                 StageToolGroup(
                     "Project",
@@ -525,7 +515,6 @@ class MainWindow(QMainWindow):
                     "Normal",
                     [
                         self._stage_tool_button(self.detection_panel.run_selected_button, "Detect Page"),
-                        self._stage_tool_button(self.detection_panel.run_all_button, "Detect All"),
                         self._stage_tool_button(self.detection_panel.reload_button),
                     ],
                 ),
@@ -537,7 +526,6 @@ class MainWindow(QMainWindow):
                     "Re-run / Force",
                     [
                         self._stage_tool_button(self.detection_panel.rerun_selected_button, "Re-detect Page"),
-                        self._stage_tool_button(self.detection_panel.rerun_all_button, "Re-detect All"),
                     ],
                 ),
             ],
@@ -546,9 +534,7 @@ class MainWindow(QMainWindow):
                     "Normal",
                     [
                         self._stage_tool_button(self.ocr_panel.prepare_selected_button),
-                        self._stage_tool_button(self.ocr_panel.prepare_all_button),
                         self._stage_tool_button(self.ocr_panel.run_selected_button),
-                        self._stage_tool_button(self.ocr_panel.run_all_button),
                         self._stage_tool_button(self.ocr_panel.run_selected_items_button),
                         self._stage_tool_button(self.ocr_panel.save_text_button),
                         self._stage_tool_button(self.ocr_panel.reload_button),
@@ -558,9 +544,7 @@ class MainWindow(QMainWindow):
                     "Re-run / Force",
                     [
                         self._stage_tool_button(self.ocr_panel.reprepare_selected_button),
-                        self._stage_tool_button(self.ocr_panel.reprepare_all_button),
                         self._stage_tool_button(self.ocr_panel.rerun_selected_button),
-                        self._stage_tool_button(self.ocr_panel.rerun_all_button),
                         self._stage_tool_button(self.ocr_panel.rerun_selected_items_button),
                     ],
                 ),
@@ -570,9 +554,7 @@ class MainWindow(QMainWindow):
                     "Normal",
                     [
                         self._stage_tool_button(self.translation_panel.initialize_selected_button),
-                        self._stage_tool_button(self.translation_panel.initialize_all_button),
                         self._stage_tool_button(self.translation_panel.run_selected_button),
-                        self._stage_tool_button(self.translation_panel.run_all_button),
                         self._stage_tool_button(self.translation_panel.run_selected_items_button),
                         self._stage_tool_button(self.translation_panel.save_text_button, "Save Text"),
                         self._stage_tool_button(self.translation_panel.reload_button),
@@ -582,9 +564,7 @@ class MainWindow(QMainWindow):
                     "Re-run / Force",
                     [
                         self._stage_tool_button(self.translation_panel.reinitialize_selected_button),
-                        self._stage_tool_button(self.translation_panel.reinitialize_all_button),
                         self._stage_tool_button(self.translation_panel.rerun_selected_button),
-                        self._stage_tool_button(self.translation_panel.rerun_all_button),
                         self._stage_tool_button(self.translation_panel.rerun_selected_items_button),
                     ],
                 ),
@@ -594,9 +574,7 @@ class MainWindow(QMainWindow):
                     "Normal",
                     [
                         self._stage_tool_button(self.inpaint_panel.prepare_selected_button),
-                        self._stage_tool_button(self.inpaint_panel.prepare_all_button, "Prepare Mask All"),
                         self._stage_tool_button(self.inpaint_panel.run_selected_button),
-                        self._stage_tool_button(self.inpaint_panel.run_all_button),
                         self._stage_tool_button(self.inpaint_panel.reload_button),
                     ],
                 ),
@@ -608,9 +586,7 @@ class MainWindow(QMainWindow):
                     "Re-run / Force",
                     [
                         self._stage_tool_button(self.inpaint_panel.reprepare_selected_button),
-                        self._stage_tool_button(self.inpaint_panel.reprepare_all_button, "Re-prepare Mask All"),
                         self._stage_tool_button(self.inpaint_panel.rerun_selected_button),
-                        self._stage_tool_button(self.inpaint_panel.rerun_all_button),
                     ],
                 ),
             ],
@@ -619,9 +595,7 @@ class MainWindow(QMainWindow):
                     "Normal",
                     [
                         self._stage_tool_button(self.render_panel.prepare_selected_button, "Prepare Render"),
-                        self._stage_tool_button(self.render_panel.prepare_all_button, "Prepare Render All"),
                         self._stage_tool_button(self.render_panel.run_selected_button),
-                        self._stage_tool_button(self.render_panel.run_all_button),
                         self._stage_tool_button(self.render_panel.reload_button),
                     ],
                 ),
@@ -633,9 +607,7 @@ class MainWindow(QMainWindow):
                     "Re-run / Force",
                     [
                         self._stage_tool_button(self.render_panel.reprepare_selected_button, "Re-prepare Render"),
-                        self._stage_tool_button(self.render_panel.reprepare_all_button, "Re-prepare Render All"),
                         self._stage_tool_button(self.render_panel.rerun_selected_button),
-                        self._stage_tool_button(self.render_panel.rerun_all_button),
                     ],
                 ),
             ],
@@ -643,7 +615,6 @@ class MainWindow(QMainWindow):
         }
 
         for panel in (
-            self.process_panel,
             self.project_panel,
             self.detection_panel,
             self.ocr_panel,
@@ -671,6 +642,32 @@ class MainWindow(QMainWindow):
         self.process_panel.process_chapter_requested.connect(self.process_chapter)
         self.process_panel.reprocess_chapter_requested.connect(lambda: self.process_chapter(force=True))
         self.process_panel.cancel_requested.connect(self.stop_process)
+        self.process_panel.detect_all_requested.connect(self.run_detection_for_all_pages)
+        self.process_panel.redetect_all_requested.connect(lambda: self.run_detection_for_all_pages(force=True))
+        self.process_panel.prepare_ocr_all_requested.connect(self.prepare_ocr_items_for_all_pages)
+        self.process_panel.reprepare_ocr_all_requested.connect(
+            lambda: self.prepare_ocr_items_for_all_pages(force=True)
+        )
+        self.process_panel.run_ocr_all_requested.connect(self.run_ocr_for_all_pages)
+        self.process_panel.rerun_ocr_all_requested.connect(lambda: self.run_ocr_for_all_pages(force=True))
+        self.process_panel.initialize_translation_all_requested.connect(self.initialize_translation_for_all_pages)
+        self.process_panel.reinitialize_translation_all_requested.connect(
+            lambda: self.initialize_translation_for_all_pages(force=True)
+        )
+        self.process_panel.translate_all_requested.connect(self.run_translation_for_all_pages)
+        self.process_panel.retranslate_all_requested.connect(lambda: self.run_translation_for_all_pages(force=True))
+        self.process_panel.prepare_mask_all_requested.connect(self.prepare_inpaint_mask_for_all_pages)
+        self.process_panel.reprepare_mask_all_requested.connect(
+            lambda: self.prepare_inpaint_mask_for_all_pages(force=True)
+        )
+        self.process_panel.inpaint_all_requested.connect(self.run_inpaint_for_all_pages)
+        self.process_panel.reinpaint_all_requested.connect(lambda: self.run_inpaint_for_all_pages(force=True))
+        self.process_panel.prepare_render_all_requested.connect(self.prepare_render_for_all_pages)
+        self.process_panel.reprepare_render_all_requested.connect(
+            lambda: self.prepare_render_for_all_pages(force=True)
+        )
+        self.process_panel.render_all_requested.connect(self.run_render_for_all_pages)
+        self.process_panel.rerender_all_requested.connect(lambda: self.run_render_for_all_pages(force=True))
 
         self.detection_panel.run_selected_requested.connect(self.run_detection_for_selected_page)
         self.detection_panel.rerun_selected_requested.connect(lambda: self.run_detection_for_selected_page(force=True))

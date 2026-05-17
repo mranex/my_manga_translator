@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QLabel, QSizePolicy, QStyle, QToolButton, QVBoxLayout, QWidget
 
@@ -49,15 +49,18 @@ class LeftToolBar(QFrame):
         self.setObjectName("LeftToolBar")
         self.setMinimumWidth(100)
         self.setMaximumWidth(130)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(0)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+        self._tool_buttons: list[QToolButton] = []
+        self._compact_spacers: list[int] = []
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(8, 8, 8, 8)
+        self._layout.setSpacing(6)
 
-        title_label = QLabel("Review", self)
-        title_label.setProperty("role", "sectionTitle")
-        layout.addWidget(title_label)
+        self.title_label = QLabel("Review", self)
+        self.title_label.setProperty("role", "sectionTitle")
+        self._layout.addWidget(self.title_label)
 
         self.first_page_button = self._build_button(
             "",
@@ -94,34 +97,39 @@ class LeftToolBar(QFrame):
             self.next_page_button,
             self.last_page_button,
         ):
-            layout.addWidget(button)
+            self._layout.addWidget(button)
 
-        layout.addSpacing(4)
+        self._compact_spacers.append(4)
+        self._layout.addSpacing(self._compact_spacers[-1])
 
-        mode_label = QLabel("Mode", self)
-        mode_label.setProperty("role", "muted")
-        layout.addWidget(mode_label)
+        self.mode_label = QLabel("Mode", self)
+        self.mode_label.setProperty("role", "muted")
+        self._layout.addWidget(self.mode_label)
 
         self.mode_combo = QComboBox(self)
         self.mode_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContentsOnFirstShow)
         self.mode_combo.setMinimumContentsLength(4)
         self.mode_combo.currentIndexChanged.connect(self._emit_current_mode_changed)
         self.mode_combo.setToolTip("Choose which preview layer to show.")
-        layout.addWidget(self.mode_combo)
+        self.mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._layout.addWidget(self.mode_combo)
 
         self.auto_preview_checkbox = QCheckBox("Auto", self)
         self.auto_preview_checkbox.setToolTip("Automatically switch to the newest useful preview result.")
         self.auto_preview_checkbox.setChecked(True)
         self.auto_preview_checkbox.toggled.connect(self.auto_preview_changed.emit)
-        layout.addWidget(self.auto_preview_checkbox)
+        self.auto_preview_checkbox.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._layout.addWidget(self.auto_preview_checkbox)
 
         self.follow_batch_checkbox = QCheckBox("Follow", self)
         self.follow_batch_checkbox.setToolTip("Follow the page currently being processed during batch work.")
         self.follow_batch_checkbox.setChecked(False)
         self.follow_batch_checkbox.toggled.connect(self.follow_batch_progress_changed.emit)
-        layout.addWidget(self.follow_batch_checkbox)
+        self.follow_batch_checkbox.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._layout.addWidget(self.follow_batch_checkbox)
 
-        layout.addSpacing(4)
+        self._compact_spacers.append(4)
+        self._layout.addSpacing(self._compact_spacers[-1])
 
         self.fit_button = self._build_button("Fit", "Fit the preview to the available view.", self.fit_requested.emit)
         self.reset_button = self._build_button("1:1", "Reset preview zoom to 100%.", self.reset_zoom_requested.emit)
@@ -134,9 +142,9 @@ class LeftToolBar(QFrame):
             self.zoom_out_button,
             self.zoom_in_button,
         ):
-            layout.addWidget(button)
+            self._layout.addWidget(button)
 
-        layout.addStretch(1)
+        self._layout.addStretch(1)
 
         self.developer_log_button = self._build_button(
             "Logs",
@@ -145,7 +153,8 @@ class LeftToolBar(QFrame):
             checkable=True,
             icon_kind=QStyle.StandardPixmap.SP_FileDialogDetailedView,
         )
-        layout.addWidget(self.developer_log_button)
+        self._layout.addWidget(self.developer_log_button)
+        self._apply_density("normal")
 
     def _build_button(
         self,
@@ -163,8 +172,6 @@ class LeftToolBar(QFrame):
         button.setCheckable(checkable)
         button.setProperty("leftToolButton", True)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setMinimumHeight(30)
-        button.setMaximumHeight(34)
         button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if icon_kind is not None:
             colorized = get_colorized_icon(self.style(), icon_kind)
@@ -176,7 +183,50 @@ class LeftToolBar(QFrame):
         else:
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.clicked.connect(lambda _checked=False: callback())
+        self._tool_buttons.append(button)
         return button
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(self.minimumWidth(), 0)
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        return QSize(112, 0)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        height = max(0, self.height())
+        if height <= 360:
+            density = "ultra"
+        elif height <= 520:
+            density = "compact"
+        else:
+            density = "normal"
+        self._apply_density(density)
+
+    def _apply_density(self, density: str) -> None:
+        normalized = str(density or "normal").strip().lower()
+        ultra_compact = normalized == "ultra"
+        compact = ultra_compact or normalized == "compact"
+
+        margins = 4 if compact else 8
+        spacing = 3 if ultra_compact else (4 if compact else 6)
+        button_height = 22 if ultra_compact else (26 if compact else 32)
+        control_height = 22 if ultra_compact else (24 if compact else 30)
+
+        self._layout.setContentsMargins(margins, margins, margins, margins)
+        self._layout.setSpacing(spacing)
+
+        for button in self._tool_buttons:
+            button.setFixedHeight(button_height)
+
+        self.mode_combo.setFixedHeight(control_height)
+        self.auto_preview_checkbox.setMinimumHeight(0)
+        self.follow_batch_checkbox.setMinimumHeight(0)
+        self.auto_preview_checkbox.setMaximumHeight(control_height)
+        self.follow_batch_checkbox.setMaximumHeight(control_height)
+
+        self.title_label.setVisible(not compact)
+        self.mode_label.setVisible(not compact)
 
     def set_modes(self, modes: Sequence[str], current_mode: str | None = None) -> None:
         unique_modes = [str(mode) for mode in modes if str(mode).strip()]

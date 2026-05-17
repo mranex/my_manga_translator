@@ -431,6 +431,7 @@ class OCRPanel(StagePanel):
         self.editor_section.content_layout.addLayout(editor_info_layout)
 
         editor_body = QWidget()
+        editor_body.setObjectName("EditorBodyWidget")
         editor_body_layout = QGridLayout(editor_body)
         editor_body_layout.setContentsMargins(0, 0, 0, 0)
         editor_body_layout.setHorizontalSpacing(12)

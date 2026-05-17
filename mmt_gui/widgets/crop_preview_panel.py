@@ -15,6 +15,7 @@ class CropPreviewPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("CropPreviewPanel")
         self._project_root: Path | None = None
 
         layout = QVBoxLayout(self)
