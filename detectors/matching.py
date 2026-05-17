@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from math import floor
 from typing import Sequence
-
-from .base import BubbleRegion, TextRegion
 
 
 BBox = tuple[int, int, int, int]
@@ -96,92 +93,7 @@ def bbox_iou(a: BBox, b: BBox) -> float:
     return intersection / union
 
 
-def _smallest_containing_bubble_index(
-    point: Point,
-    bubbles: Sequence[BubbleRegion],
-    *,
-    use_mask: bool = False,
-    bbox_padding: int = 0,
-) -> int | None:
-    candidates: list[tuple[int, float]] = []
-
-    for bubble_index, bubble in enumerate(bubbles):
-        if use_mask:
-            if bubble.mask is None or not point_in_mask(point, bubble.mask):
-                continue
-        elif not point_in_bbox(point, bubble.bbox, padding=bbox_padding):
-            continue
-
-        candidates.append((bubble_index, bbox_area(bubble.bbox)))
-
-    if not candidates:
-        return None
-
-    return min(candidates, key=lambda candidate: candidate[1])[0]
-
-
-def _best_iou_bubble_index(
-    text_region: TextRegion,
-    bubbles: Sequence[BubbleRegion],
-    *,
-    min_iou: float,
-) -> int | None:
-    best_index: int | None = None
-    best_iou = -1.0
-
-    for bubble_index, bubble in enumerate(bubbles):
-        current_iou = bbox_iou(text_region.bbox, bubble.bbox)
-        if current_iou < min_iou:
-            continue
-        if current_iou > best_iou:
-            best_iou = current_iou
-            best_index = bubble_index
-
-    return best_index
-
-
-def assign_text_regions_to_bubbles(
-    text_regions: Sequence[TextRegion],
-    bubbles: Sequence[BubbleRegion],
-    *,
-    bbox_padding: int = 12,
-    min_iou: float = 0.05,
-    mutate: bool = False,
-) -> list[TextRegion]:
-    assigned_regions: list[TextRegion] = []
-
-    for text_region in text_regions:
-        center = bbox_center(text_region.bbox)
-
-        bubble_id = _smallest_containing_bubble_index(
-            center,
-            bubbles,
-            use_mask=True,
-        )
-        if bubble_id is None:
-            bubble_id = _smallest_containing_bubble_index(
-                center,
-                bubbles,
-                bbox_padding=bbox_padding,
-            )
-        if bubble_id is None:
-            bubble_id = _best_iou_bubble_index(
-                text_region,
-                bubbles,
-                min_iou=min_iou,
-            )
-
-        if mutate:
-            text_region.bubble_id = bubble_id
-            assigned_regions.append(text_region)
-        else:
-            assigned_regions.append(replace(text_region, bubble_id=bubble_id))
-
-    return assigned_regions
-
-
 __all__ = [
-    "assign_text_regions_to_bubbles",
     "bbox_area",
     "bbox_center",
     "bbox_intersection_area",

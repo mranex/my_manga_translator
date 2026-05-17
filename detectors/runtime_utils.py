@@ -9,15 +9,14 @@ try:
 except ModuleNotFoundError:
     np = None
 
-from .base import BubbleRegion, TextRegion, bubble_region_from_legacy_detection
-from .selection import (
+from .base import BubbleRegion, bubble_region_from_legacy_detection
+from .matching import (
     bbox_area,
     bbox_center,
     bbox_intersection_area,
     bbox_iou,
-    center_in_bbox,
+    point_in_bbox,
 )
-from .text_block_geometry import expanded_text_block_crop_bounds
 
 
 def legacy_detection_to_bubble_region(result: Sequence[object]) -> BubbleRegion:
@@ -43,12 +42,12 @@ def clamp_bbox_to_image(
     x2 = max(0, min(int(x2), width))
     y2 = max(0, min(int(y2), height))
 
-    if x2 < x1:
-        x1, x2 = x2, x1
-    if y2 < y1:
-        y1, y2 = y2, y1
-
-    return (x1, y1, x2, y2)
+    return (
+        min(x1, x2),
+        min(y1, y2),
+        max(x1, x2),
+        max(y1, y2),
+    )
 
 
 def expand_bbox(
@@ -63,43 +62,8 @@ def expand_bbox(
     )
 
 
-def union_text_regions_bbox(
-    text_regions: Sequence[TextRegion],
-    image_shape: Sequence[int],
-    padding: int = 12,
-) -> tuple[int, int, int, int] | None:
-    if not text_regions:
-        return None
-
-    x1 = min(region.bbox[0] for region in text_regions) - padding
-    y1 = min(region.bbox[1] for region in text_regions) - padding
-    x2 = max(region.bbox[2] for region in text_regions) + padding
-    y2 = max(region.bbox[3] for region in text_regions) + padding
-
-    return clamp_bbox_to_image((x1, y1, x2, y2), image_shape)
-
-
-def union_expanded_text_block_crop_bounds(
-    text_regions: Sequence[TextRegion],
-    image_shape: Sequence[int],
-) -> tuple[int, int, int, int] | None:
-    if not text_regions:
-        return None
-
-    expanded_bboxes = [
-        expanded_text_block_crop_bounds(image_shape, region)
-        for region in text_regions
-    ]
-    x1 = min(region_bbox[0] for region_bbox in expanded_bboxes)
-    y1 = min(region_bbox[1] for region_bbox in expanded_bboxes)
-    x2 = max(region_bbox[2] for region_bbox in expanded_bboxes)
-    y2 = max(region_bbox[3] for region_bbox in expanded_bboxes)
-    return clamp_bbox_to_image((x1, y1, x2, y2), image_shape)
-
-
 def crop_bbox(image, bbox: tuple[int, int, int, int]):
     x1, y1, x2, y2 = bbox
-
     try:
         return image[y1:y2, x1:x2]
     except TypeError:
@@ -123,7 +87,6 @@ def _grayscale_values(image: np.ndarray) -> np.ndarray:
     np_module = _require_numpy()
     if image.ndim == 2:
         return image.astype(np_module.float32)
-
     return (
         (0.114 * image[..., 0])
         + (0.587 * image[..., 1])
@@ -136,7 +99,6 @@ def _resize_mask_nearest(mask: np.ndarray, height: int, width: int) -> np.ndarra
     source_height, source_width = mask.shape[:2]
     if source_height == height and source_width == width:
         return mask
-
     if source_height <= 0 or source_width <= 0:
         return np_module.zeros((height, width), dtype=mask.dtype)
 
@@ -174,7 +136,6 @@ def _to_numpy_mask(mask) -> np.ndarray:
             array = array[..., 0]
     if array.ndim != 2:
         raise ValueError("Mask must be 2D after normalization")
-
     return array
 
 
@@ -182,7 +143,6 @@ def normalize_binary_mask(mask, image_shape: Sequence[int]) -> np.ndarray:
     np_module = _require_numpy()
     height = int(image_shape[0])
     width = int(image_shape[1])
-
     if height <= 0 or width <= 0:
         raise ValueError("Image shape must have positive height and width")
 
@@ -201,66 +161,7 @@ def normalize_binary_mask(mask, image_shape: Sequence[int]) -> np.ndarray:
         else:
             array = _resize_mask_nearest(array, height, width)
 
-    binary_mask = np_module.where(array > 0, 255, 0).astype(np_module.uint8)
-    return binary_mask
-
-
-def _rect_contour(width: int, height: int) -> np.ndarray:
-    np_module = _require_numpy()
-    max_x = max(int(width) - 1, 0)
-    max_y = max(int(height) - 1, 0)
-    return np_module.array(
-        [
-            [[0, 0]],
-            [[max_x, 0]],
-            [[max_x, max_y]],
-            [[0, max_y]],
-        ],
-        dtype=np_module.int32,
-    )
-
-
-def rectangular_contour(width: int, height: int):
-    return _rect_contour(width, height)
-
-
-def mask_to_contour(mask) -> np.ndarray:
-    np_module = _require_numpy()
-    mask_array = _to_numpy_mask(mask)
-
-    if mask_array.size == 0:
-        return _rect_contour(1, 1)
-
-    binary_mask = np_module.where(mask_array > 0, 255, 0).astype(np_module.uint8)
-    height, width = binary_mask.shape[:2]
-
-    cv2 = _get_cv2()
-    if cv2 is not None:
-        contours, _ = cv2.findContours(
-            binary_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        if contours:
-            return max(contours, key=cv2.contourArea)
-
-    ys, xs = np_module.nonzero(binary_mask > 0)
-    if xs.size == 0 or ys.size == 0:
-        return _rect_contour(width, height)
-
-    x1 = int(xs.min())
-    y1 = int(ys.min())
-    x2 = int(xs.max()) + 1
-    y2 = int(ys.max()) + 1
-    return np_module.array(
-        [
-            [[x1, y1]],
-            [[max(x2 - 1, x1), y1]],
-            [[max(x2 - 1, x1), max(y2 - 1, y1)]],
-            [[x1, max(y2 - 1, y1)]],
-        ],
-        dtype=np_module.int32,
-    )
+    return np_module.where(array > 0, 255, 0).astype(np_module.uint8)
 
 
 def detect_dark_bubble_from_mask(
@@ -280,147 +181,6 @@ def detect_dark_bubble_from_mask(
     gray = _grayscale_values(image)
     median_intensity = float(np_module.median(gray[masked_pixels]))
     return median_intensity < float(threshold)
-
-
-def _detect_fill_color_from_mask(
-    image: np.ndarray,
-    binary_mask: np.ndarray,
-    *,
-    bubble_is_dark: bool,
-) -> tuple[int, int, int]:
-    np_module = _require_numpy()
-    default_color = (0, 0, 0) if bubble_is_dark else (255, 255, 255)
-    if image is None or image.size == 0:
-        return default_color
-
-    pixels = image[binary_mask > 0]
-    if pixels.size == 0:
-        return default_color
-
-    gray = _grayscale_values(pixels.reshape((-1, 1, 3))).reshape(-1)
-
-    if bubble_is_dark:
-        cutoff = float(np_module.percentile(gray, 60))
-        background_pixels = pixels[gray <= cutoff]
-    else:
-        cutoff = float(np_module.percentile(gray, 40))
-        background_pixels = pixels[gray >= cutoff]
-
-    if background_pixels.size == 0:
-        background_pixels = pixels
-
-    color = np_module.median(background_pixels, axis=0)
-    return tuple(int(np_module.clip(channel, 0, 255)) for channel in color)
-
-
-def process_bubble_with_mask(
-    bubble_crop: np.ndarray,
-    mask_crop,
-    force_dark: bool = False,
-):
-    np_module = _require_numpy()
-    if bubble_crop is None or getattr(bubble_crop, "size", 0) == 0:
-        raise ValueError("Bubble crop must contain image data")
-
-    binary_mask = normalize_binary_mask(mask_crop, bubble_crop.shape)
-    if not np_module.any(binary_mask):
-        binary_mask = np_module.full(
-            bubble_crop.shape[:2],
-            255,
-            dtype=np_module.uint8,
-        )
-
-    contour = mask_to_contour(binary_mask)
-    bubble_is_dark = detect_dark_bubble_from_mask(bubble_crop, binary_mask)
-    if force_dark:
-        bubble_is_dark = True
-
-    detected_color = _detect_fill_color_from_mask(
-        bubble_crop,
-        binary_mask,
-        bubble_is_dark=bubble_is_dark,
-    )
-    bubble_crop[binary_mask > 0] = detected_color
-
-    return bubble_crop, contour, bubble_is_dark, detected_color
-
-
-def bubble_region_to_crop_data(
-    image: np.ndarray,
-    bubble_region: BubbleRegion,
-    matched_text_regions: Sequence[TextRegion] | None = None,
-    *,
-    padding: int = 24,
-):
-    np_module = _require_numpy()
-    bubble_bbox = clamp_bbox_to_image(bubble_region.bbox, image.shape)
-    bubble_crop = crop_bbox(image, bubble_bbox)
-
-    if bubble_region.mask is None:
-        mask_crop = np_module.full(
-            bubble_crop.shape[:2],
-            255,
-            dtype=np_module.uint8,
-        )
-    else:
-        full_mask = normalize_binary_mask(bubble_region.mask, image.shape)
-        mask_crop = crop_bbox(full_mask, bubble_bbox)
-
-    ocr_bbox = union_expanded_text_block_crop_bounds(
-        matched_text_regions or [],
-        image.shape,
-    )
-    if ocr_bbox is None:
-        ocr_bbox = bubble_bbox
-    elif padding:
-        ocr_bbox = expand_bbox(ocr_bbox, image.shape, padding)
-
-    ocr_crop = crop_bbox(image, ocr_bbox)
-
-    return {
-        "bubble_bbox": bubble_bbox,
-        "bubble_crop": bubble_crop,
-        "mask_crop": mask_crop,
-        "ocr_bbox": ocr_bbox,
-        "ocr_crop": ocr_crop,
-    }
-
-
-def text_region_to_crop_data(
-    image: np.ndarray,
-    text_region: TextRegion,
-    *,
-    padding: int = 16,
-):
-    np_module = _require_numpy()
-    region_bbox = expanded_text_block_crop_bounds(image.shape, text_region)
-    if padding:
-        region_bbox = expand_bbox(region_bbox, image.shape, padding)
-    region_crop = crop_bbox(image, region_bbox)
-
-    if text_region.mask is None:
-        mask_crop = np_module.full(
-            region_crop.shape[:2],
-            255,
-            dtype=np_module.uint8,
-        )
-    else:
-        full_mask = normalize_binary_mask(text_region.mask, image.shape)
-        mask_crop = crop_bbox(full_mask, region_bbox)
-        if not np_module.any(mask_crop):
-            mask_crop = np_module.full(
-                region_crop.shape[:2],
-                255,
-                dtype=np_module.uint8,
-            )
-
-    return {
-        "region_bbox": region_bbox,
-        "region_crop": region_crop,
-        "mask_crop": mask_crop,
-        "ocr_bbox": region_bbox,
-        "ocr_crop": crop_bbox(image, region_bbox),
-    }
 
 
 def map_bbox_from_roi_to_page(
@@ -447,7 +207,6 @@ def map_mask_from_roi_to_page(mask, roi_bbox, image_shape):
     roi_x1, roi_y1, roi_x2, roi_y2 = clamp_bbox_to_image(roi_bbox, image_shape)
     roi_width = max(0, roi_x2 - roi_x1)
     roi_height = max(0, roi_y2 - roi_y1)
-
     if roi_width <= 0 or roi_height <= 0:
         return np_module.zeros((page_height, page_width), dtype=np_module.uint8)
 
@@ -458,44 +217,6 @@ def map_mask_from_roi_to_page(mask, roi_bbox, image_shape):
         local_mask[:roi_height, :roi_width],
     )
     return full_mask
-
-
-def _map_line_polygons_from_roi_to_page(line_polygons, roi_bbox):
-    if not line_polygons:
-        return line_polygons
-
-    roi_x1, roi_y1, _, _ = roi_bbox
-    mapped_polygons = []
-    for polygon in line_polygons:
-        mapped_polygon = []
-        try:
-            for point in polygon:
-                if len(point) < 2:
-                    continue
-                mapped_polygon.append(
-                    [int(point[0]) + int(roi_x1), int(point[1]) + int(roi_y1)]
-                )
-        except TypeError:
-            continue
-        if mapped_polygon:
-            mapped_polygons.append(mapped_polygon)
-    return mapped_polygons or None
-
-
-def map_text_region_from_roi_to_page(
-    text_region: TextRegion,
-    roi_bbox,
-    image_shape,
-) -> TextRegion:
-    return replace(
-        text_region,
-        bbox=map_bbox_from_roi_to_page(text_region.bbox, roi_bbox),
-        mask=map_mask_from_roi_to_page(text_region.mask, roi_bbox, image_shape),
-        line_polygons=_map_line_polygons_from_roi_to_page(
-            text_region.line_polygons,
-            roi_bbox,
-        ),
-    )
 
 
 def map_bubble_region_from_roi_to_page(
@@ -524,7 +245,6 @@ def _union_bbox(
 
 def _merge_masks(mask_a, mask_b, image_shape):
     np_module = _require_numpy()
-
     if mask_a is None and mask_b is None:
         return None
     if mask_a is None:
@@ -552,6 +272,10 @@ def _infer_image_shape_from_masks(mask_a, mask_b):
         except (TypeError, IndexError, KeyError):
             continue
     return None
+
+
+def _center_in_bbox(point, bbox, *, padding: int = 0) -> bool:
+    return point_in_bbox(point, bbox, padding=padding)
 
 
 def _mask_overlap_metrics(mask_a, mask_b, image_shape):
@@ -594,15 +318,14 @@ def merge_duplicate_bubble_regions(
                 continue
 
             bbox_overlap_ratio = float(
-                intersection
-                / max(min(bbox_area(existing.bbox), bbox_area(bubble.bbox)), 1.0)
+                intersection / max(min(bbox_area(existing.bbox), bbox_area(bubble.bbox)), 1.0)
             )
             current_iou = bbox_iou(existing.bbox, bubble.bbox)
             existing_center = bbox_center(existing.bbox)
             bubble_center = bbox_center(bubble.bbox)
             center_overlap = (
-                center_in_bbox(existing_center, bubble.bbox)
-                or center_in_bbox(bubble_center, existing.bbox)
+                _center_in_bbox(existing_center, bubble.bbox)
+                or _center_in_bbox(bubble_center, existing.bbox)
             )
             merge_shape = (
                 image_shape
@@ -649,11 +372,7 @@ def merge_duplicate_bubble_regions(
             bbox=_union_bbox(existing.bbox, bubble.bbox),
             score=max(existing.score, bubble.score),
             class_id=preferred.class_id,
-            mask=_merge_masks(
-                existing.mask,
-                bubble.mask,
-                merge_shape,
-            )
+            mask=_merge_masks(existing.mask, bubble.mask, merge_shape)
             if (
                 merge_shape is not None
                 and (existing.mask is not None or bubble.mask is not None)
@@ -666,69 +385,7 @@ def merge_duplicate_bubble_regions(
     return merged
 
 
-def merge_duplicate_text_regions(
-    text_regions: Sequence[TextRegion],
-    *,
-    iou_threshold: float = 0.5,
-    image_shape=None,
-) -> list[TextRegion]:
-    merged: list[TextRegion] = []
-
-    for text_region in text_regions:
-        match_index = None
-        best_iou = 0.0
-        for index, existing in enumerate(merged):
-            current_iou = bbox_iou(existing.bbox, text_region.bbox)
-            if current_iou >= iou_threshold and current_iou >= best_iou:
-                best_iou = current_iou
-                match_index = index
-
-        if match_index is None:
-            merged.append(text_region)
-            continue
-
-        existing = merged[match_index]
-        preferred = (
-            text_region
-            if text_region.confidence > existing.confidence
-            else existing
-        )
-        reading_orders = [
-            value
-            for value in (existing.reading_order, text_region.reading_order)
-            if value is not None
-        ]
-        merge_shape = image_shape if image_shape is not None else _infer_image_shape_from_masks(existing.mask, text_region.mask)
-        merged[match_index] = TextRegion(
-            bbox=_union_bbox(existing.bbox, text_region.bbox),
-            score=max(existing.score, text_region.score),
-            class_id=preferred.class_id,
-            mask=_merge_masks(
-                existing.mask,
-                text_region.mask,
-                merge_shape,
-            )
-            if (
-                merge_shape is not None
-                and (existing.mask is not None or text_region.mask is not None)
-            )
-            else None,
-            text=preferred.text if preferred.text else existing.text or text_region.text,
-            confidence=max(existing.confidence, text_region.confidence),
-            bubble_id=existing.bubble_id if existing.bubble_id is not None else text_region.bubble_id,
-            reading_order=min(reading_orders) if reading_orders else None,
-            detector=preferred.detector if preferred.detector is not None else existing.detector or text_region.detector,
-            line_polygons=preferred.line_polygons or existing.line_polygons or text_region.line_polygons,
-            source_direction=preferred.source_direction or existing.source_direction or text_region.source_direction,
-            rotation_deg=preferred.rotation_deg if preferred.rotation_deg is not None else existing.rotation_deg if existing.rotation_deg is not None else text_region.rotation_deg,
-            detected_font_size_px=preferred.detected_font_size_px if preferred.detected_font_size_px is not None else existing.detected_font_size_px if existing.detected_font_size_px is not None else text_region.detected_font_size_px,
-        )
-
-    return merged
-
-
 __all__ = [
-    "bubble_region_to_crop_data",
     "clamp_bbox_to_image",
     "convert_legacy_detections_to_bubble_regions",
     "crop_bbox",
@@ -738,14 +395,6 @@ __all__ = [
     "map_bbox_from_roi_to_page",
     "map_bubble_region_from_roi_to_page",
     "map_mask_from_roi_to_page",
-    "map_text_region_from_roi_to_page",
-    "mask_to_contour",
     "merge_duplicate_bubble_regions",
-    "merge_duplicate_text_regions",
     "normalize_binary_mask",
-    "process_bubble_with_mask",
-    "rectangular_contour",
-    "text_region_to_crop_data",
-    "union_expanded_text_block_crop_bounds",
-    "union_text_regions_bbox",
 ]

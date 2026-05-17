@@ -326,7 +326,7 @@ class YoloSegBubbleDetector:
     def detect_page_regions(self, image: np.ndarray) -> PageDetectionResult:
         return PageDetectionResult(
             bubbles=self.detect_segmented_bubble_regions(image),
-            text_regions=[],
+            layout_regions=[],
             method="yolov8_seg_speech_bubble",
         )
 

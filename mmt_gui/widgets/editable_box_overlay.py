@@ -14,7 +14,6 @@ MIN_BOX_SIZE = 4
 
 CATEGORY_COLORS = {
     "bubble": QColor(56, 189, 248),
-    "text_region": QColor(251, 191, 36),
     "layout_region": QColor(168, 85, 247),
     "ocr_bbox": QColor(251, 191, 36),
     "ocr_item": QColor(56, 189, 248),
@@ -116,8 +115,6 @@ def normalize_box_payload(box_data: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_category(value: Any) -> str:
     normalized = str(value or "").strip().lower().replace(" ", "_")
-    if normalized == "text":
-        return "text_region"
     if normalized == "layout":
         return "layout_region"
     if normalized in {"ocr_crop_box", "ocr_crop", "ocr"}:
@@ -173,11 +170,6 @@ def make_manual_box(
     }
     if normalized_category == "bubble":
         item["mask_path"] = None
-    elif normalized_category == "text_region":
-        item["bubble_id"] = None
-        item["reading_order"] = next_reading_order
-        item["source_direction"] = infer_source_direction(bbox)
-        item["rotation_deg"] = 0.0
     else:
         item["label"] = "text"
         item["reading_order"] = next_reading_order
@@ -203,7 +195,7 @@ def next_box_id(boxes: list[dict[str, Any]], category: str) -> int:
 
 def next_reading_order(boxes: list[dict[str, Any]], category: str) -> int | None:
     normalized_category = normalize_category(category)
-    if normalized_category not in {"text_region", "layout_region"}:
+    if normalized_category != "layout_region":
         return None
     orders = [
         safe_int(box.get("reading_order"))

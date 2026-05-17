@@ -24,7 +24,6 @@ from .base_panel import StagePanel
 
 BOX_TYPE_OPTIONS = (
     ("Bubble", "bubble"),
-    ("Text Region", "text_region"),
     ("Layout Region", "layout_region"),
 )
 
@@ -118,7 +117,6 @@ class DetectionPanel(StagePanel):
         stats_form.setSpacing(8)
 
         self.bubbles_value = QLabel("0")
-        self.text_regions_value = QLabel("0")
         self.layout_regions_value = QLabel("0")
         self.method_value = QLabel("-")
         self.cache_path_value = QLabel("-")
@@ -128,7 +126,6 @@ class DetectionPanel(StagePanel):
         self.edit_state_value.setWordWrap(True)
 
         stats_form.addRow("Bubbles:", self.bubbles_value)
-        stats_form.addRow("Text Regions:", self.text_regions_value)
         stats_form.addRow("Layout Regions:", self.layout_regions_value)
         stats_form.addRow("Method:", self.method_value)
         stats_form.addRow("Cache JSON:", self.cache_path_value)
@@ -243,9 +240,6 @@ class DetectionPanel(StagePanel):
         summary = summarize_detection_edit_state(payload)
         self.bubbles_value.setText(
             f"{summary.get('active_bubbles', 0)} active / {summary.get('excluded_bubbles', 0)} excluded"
-        )
-        self.text_regions_value.setText(
-            f"{summary.get('active_text_regions', 0)} active / {summary.get('excluded_text_regions', 0)} excluded"
         )
         self.layout_regions_value.setText(
             f"{summary.get('active_layout_regions', 0)} active / {summary.get('excluded_layout_regions', 0)} excluded"

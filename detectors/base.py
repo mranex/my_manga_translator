@@ -43,37 +43,6 @@ class BubbleRegion(Region):
 
 
 @dataclass(slots=True)
-class TextRegion(Region):
-    kind: str = field(default="text", init=False)
-    text: str = ""
-    confidence: float = 1.0
-    bubble_id: int | None = None
-    reading_order: int | None = None
-    detector: str | None = None
-    line_polygons: Any | None = None
-    source_direction: str | None = None
-    rotation_deg: float | None = None
-    detected_font_size_px: float | None = None
-
-    def __post_init__(self) -> None:
-        Region.__post_init__(self)
-        self.text = str(self.text)
-        self.confidence = float(self.confidence)
-        if self.bubble_id is not None:
-            self.bubble_id = int(self.bubble_id)
-        if self.reading_order is not None:
-            self.reading_order = int(self.reading_order)
-        if self.detector is not None:
-            self.detector = str(self.detector)
-        if self.source_direction is not None:
-            self.source_direction = str(self.source_direction)
-        if self.rotation_deg is not None:
-            self.rotation_deg = float(self.rotation_deg)
-        if self.detected_font_size_px is not None:
-            self.detected_font_size_px = float(self.detected_font_size_px)
-
-
-@dataclass(slots=True)
 class LayoutRegion(Region):
     kind: str = field(default="layout", init=False)
     label: str = ""
@@ -93,7 +62,6 @@ class LayoutRegion(Region):
 @dataclass(slots=True)
 class PageDetectionResult:
     bubbles: list[BubbleRegion] = field(default_factory=list)
-    text_regions: list[TextRegion] = field(default_factory=list)
     layout_regions: list[LayoutRegion] = field(default_factory=list)
     method: str = "legacy_yolo"
     stats: dict[str, Any] = field(default_factory=dict)
@@ -131,6 +99,5 @@ __all__ = [
     "LegacyBubbleDetection",
     "PageDetectionResult",
     "Region",
-    "TextRegion",
     "bubble_region_from_legacy_detection",
 ]

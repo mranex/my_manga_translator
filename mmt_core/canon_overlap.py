@@ -193,8 +193,6 @@ def _overlap_group_kind(item: dict[str, Any]) -> str | None:
     kind = str(item.get("kind", "") or "").strip().lower()
     if kind == "bubble":
         return "bubble"
-    if kind in {"outside_text", "text_region"}:
-        return "text_region"
     if kind == "layout_text":
         return "layout_text"
     return None

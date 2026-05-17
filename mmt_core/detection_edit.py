@@ -23,7 +23,6 @@ from .image_io import ensure_path
 
 CATEGORY_TO_JSON_KEY = {
     "bubble": "bubbles",
-    "text_region": "text_regions",
     "layout_region": "layout_regions",
 }
 JSON_KEY_TO_CATEGORY = {value: key for key, value in CATEGORY_TO_JSON_KEY.items()}
@@ -266,12 +265,10 @@ def _legacy_raw_detection_summary(data: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "active_bubbles": 0,
         "excluded_bubbles": 0,
-        "active_text_regions": 0,
-        "excluded_text_regions": 0,
         "active_layout_regions": 0,
         "excluded_layout_regions": 0,
     }
-    for json_key in ("bubbles", "text_regions", "layout_regions"):
+    for json_key in ("bubbles", "layout_regions"):
         regions = data.get(json_key, [])
         if not isinstance(regions, list):
             continue
@@ -293,8 +290,6 @@ def _normalize_category(value: Any) -> str:
         return normalized
     if normalized in CATEGORY_TO_JSON_KEY.values():
         return JSON_KEY_TO_CATEGORY[normalized]
-    if normalized == "text":
-        return "text_region"
     if normalized == "layout":
         return "layout_region"
     return "bubble"

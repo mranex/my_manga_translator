@@ -136,13 +136,6 @@ class ImagePreviewWidget(QGraphicsView):
             label_prefix="Bubble",
             show_excluded=show_excluded,
         )
-        self._add_rectangles(
-            detection_data.get("text_regions", []),
-            color=QColor(251, 191, 36),
-            line_style=Qt.PenStyle.DotLine,
-            label_prefix="Text",
-            show_excluded=show_excluded,
-        )
 
     def fit_to_view(self) -> None:
         pixmap = self._pixmap_item.pixmap()

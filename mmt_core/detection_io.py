@@ -7,13 +7,12 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
-from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult, TextRegion
-
-from .detection_region_sanitizer import sanitize_detection_payload
+from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult
 from .image_io import ensure_path, project_relative_path, save_png_image
 from .json_io import write_json_atomic
 
-DETECTION_SCHEMA_VERSION = 1
+DETECTION_SCHEMA_VERSION = 2
+_OBSOLETE_REGION_KEY = "text" + "_regions"
 
 
 class ProjectLike(Protocol):
@@ -65,7 +64,6 @@ def save_detection_result(
         "method": str(result.method),
         "stats": _json_safe(result.stats),
         "bubbles": [],
-        "text_regions": [],
         "layout_regions": [],
     }
 
@@ -84,13 +82,8 @@ def save_detection_result(
             )
         )
 
-    for text_index, text_region in enumerate(result.text_regions):
-        payload["text_regions"].append(_serialize_text_region(text_region, region_id=text_index))
-
     for layout_index, layout_region in enumerate(result.layout_regions):
         payload["layout_regions"].append(_serialize_layout_region(layout_region, region_id=layout_index))
-
-    payload = sanitize_detection_payload(payload, image_shape, logger=logger)
 
     from .canon_state import ensure_canon_state
 
@@ -113,11 +106,12 @@ def load_detection_json(path: Path | str) -> dict[str, Any]:
     if payload.get("stage") != "detection":
         raise ValueError(f"Unsupported detection cache stage in {detection_path}")
 
-    for key in ("bubbles", "text_regions", "layout_regions"):
+    for key in ("bubbles", "layout_regions"):
         value = payload.get(key, [])
         if not isinstance(value, list):
             raise ValueError(f"Detection cache field '{key}' must be a list in {detection_path}")
         payload[key] = [_normalize_detection_region(item) for item in value if isinstance(item, dict)]
+    payload.pop(_OBSOLETE_REGION_KEY, None)
 
     payload.setdefault("schema_version", DETECTION_SCHEMA_VERSION)
     payload.setdefault("method", "")
@@ -146,6 +140,7 @@ def save_detection_json(path: Path | str, data: dict[str, Any]) -> Path:
         str(key): _json_safe(value)
         for key, value in dict(data).items()
     }
+    payload.pop(_OBSOLETE_REGION_KEY, None)
     payload.update(
         {
             "schema_version": int(data.get("schema_version", DETECTION_SCHEMA_VERSION)),
@@ -156,11 +151,6 @@ def save_detection_json(path: Path | str, data: dict[str, Any]) -> Path:
             "method": str(data.get("method", "") or ""),
             "stats": _json_safe(data.get("stats", {})),
             "bubbles": [_normalize_detection_region(item) for item in data.get("bubbles", []) if isinstance(item, dict)],
-            "text_regions": [
-                _normalize_detection_region(item)
-                for item in data.get("text_regions", [])
-                if isinstance(item, dict)
-            ],
             "layout_regions": [
                 _normalize_detection_region(item)
                 for item in data.get("layout_regions", [])
@@ -191,19 +181,6 @@ def _serialize_bubble(
         "class_id": bubble.class_id,
         "is_dark": bool(bubble.is_dark),
         "mask_path": mask_path,
-    }
-
-
-def _serialize_text_region(text_region: TextRegion, *, region_id: int) -> dict[str, Any]:
-    return {
-        "id": region_id,
-        "bbox": _bbox_to_list(text_region.bbox),
-        "confidence": float(text_region.confidence),
-        "detector": text_region.detector or "unknown",
-        "bubble_id": text_region.bubble_id,
-        "reading_order": text_region.reading_order,
-        "source_direction": text_region.source_direction,
-        "rotation_deg": text_region.rotation_deg,
     }
 
 

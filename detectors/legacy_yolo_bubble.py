@@ -25,6 +25,6 @@ def detect_page_regions(
             bubble_region_from_legacy_detection(detection)
             for detection in legacy_detections
         ],
-        text_regions=[],
+        layout_regions=[],
         method="legacy_yolo",
     )

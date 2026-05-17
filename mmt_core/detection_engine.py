@@ -9,7 +9,6 @@ from typing import Any
 
 from detectors import (
     PageDetectionResult,
-    get_comic_text_detector,
     get_pp_doclayout_v3_detector,
     get_yolov8_seg_bubble_detector,
 )
@@ -27,15 +26,12 @@ class DetectionEngine:
 
     bubble_detector: Any | None = None
     layout_detector: Any | None = None
-    text_detector: Any | None = None
     disable_pp_layout_for_debug: bool = field(init=False, default=False)
     disable_yolo_for_debug: bool = field(init=False, default=False)
-    disable_comic_text_for_debug: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.disable_pp_layout_for_debug = _env_flag("MMT_DISABLE_PP_LAYOUT")
         self.disable_yolo_for_debug = _env_flag("MMT_DISABLE_YOLO_BUBBLE")
-        self.disable_comic_text_for_debug = _env_flag("MMT_DISABLE_COMIC_TEXT")
 
     def preload(self, *, logger: Logger = None, status_callback: StatusCallback = None) -> None:
         if self.disable_yolo_for_debug:
@@ -60,17 +56,6 @@ class DetectionEngine:
             if hasattr(self.layout_detector, "load"):
                 self.layout_detector.load()
 
-        if self.disable_comic_text_for_debug:
-            _status(status_callback, "MMT_DISABLE_COMIC_TEXT is set; comic/text detector will remain unavailable.")
-            _log(logger, "MMT_DISABLE_COMIC_TEXT is set; resident detection requires this detector to be loaded.")
-            self.text_detector = None
-        else:
-            _status(status_callback, "Loading comic/text detector...")
-            _log(logger, "Loading comic/text detector...")
-            self.text_detector = get_comic_text_detector()
-            if hasattr(self.text_detector, "load"):
-                self.text_detector.load()
-
     def is_ready(self) -> bool:
         return not self.missing_detectors()
 
@@ -80,14 +65,11 @@ class DetectionEngine:
             missing.append("PPLayout")
         if self.bubble_detector is None:
             missing.append("YOLO bubble")
-        if self.text_detector is None:
-            missing.append("comic/text")
         return missing
 
     def clear(self) -> None:
         self.bubble_detector = None
         self.layout_detector = None
-        self.text_detector = None
 
     def detect_image(
         self,
@@ -103,7 +85,6 @@ class DetectionEngine:
             page=current_page,
             has_layout_detector=self.layout_detector is not None,
             has_bubble_detector=self.bubble_detector is not None,
-            has_text_detector=self.text_detector is not None,
         )
         del diagnostics_path, page_name
         missing = self.missing_detectors()
@@ -120,7 +101,6 @@ class DetectionEngine:
             image,
             layout_detector=self.layout_detector,
             bubble_detector=self.bubble_detector,
-            text_detector=self.text_detector,
         )
         write_crash_breadcrumb("after detect_page_regions_layout_first", page=current_page)
         return result

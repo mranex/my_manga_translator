@@ -189,14 +189,12 @@ class DetectionRuntimeThread:
                 raise RuntimeError(
                     "Detection resident models failed to load. "
                     f"Missing resident detectors: {missing}. "
-                    "Active detection requires PPLayout, YOLO bubble, and comic/text detectors."
+                    "Active detection requires PPLayout and YOLO bubble detectors."
                 )
             if self._engine.bubble_detector is not None:
                 write_crash_breadcrumb("DetectionRuntimeThread YOLO loaded")
             if self._engine.layout_detector is not None:
                 write_crash_breadcrumb("DetectionRuntimeThread PPLayout loaded")
-            if self._engine.text_detector is not None:
-                write_crash_breadcrumb("DetectionRuntimeThread Comic/Text detector loaded")
             write_crash_breadcrumb("DetectionRuntimeThread preload done")
             write_crash_breadcrumb("DetectionRuntimeThread runtime ready")
             self._startup_log("Detection runtime is ready.")
@@ -516,7 +514,7 @@ class DetectionRuntimeThread:
             except Exception:
                 pass
         try:
-            from detectors import comic_text_detector, pp_doclayout_v3, yolov8_seg_bubble
+            from detectors import pp_doclayout_v3, yolov8_seg_bubble
 
             if hasattr(yolov8_seg_bubble, "_DETECTOR_CACHE"):
                 yolov8_seg_bubble._DETECTOR_CACHE["key"] = None
@@ -524,9 +522,6 @@ class DetectionRuntimeThread:
             if hasattr(pp_doclayout_v3, "_DETECTOR_CACHE"):
                 pp_doclayout_v3._DETECTOR_CACHE["key"] = None
                 pp_doclayout_v3._DETECTOR_CACHE["detector"] = None
-            if hasattr(comic_text_detector, "_TEXT_DETECTOR_CACHE"):
-                comic_text_detector._TEXT_DETECTOR_CACHE["key"] = None
-                comic_text_detector._TEXT_DETECTOR_CACHE["detector"] = None
         except Exception:
             pass
         gc.collect()

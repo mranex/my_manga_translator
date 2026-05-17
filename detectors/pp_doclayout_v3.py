@@ -10,9 +10,9 @@ try:
 except ModuleNotFoundError:
     np = None
 
-from .base import LayoutRegion, TextRegion
+from .base import LayoutRegion
 from .matching import bbox_iou
-from .runtime_utils import clamp_bbox_to_image, expand_bbox
+from .runtime_utils import clamp_bbox_to_image
 
 
 MODEL_ID = "PaddlePaddle/PP-DocLayoutV3_safetensors"
@@ -332,85 +332,6 @@ def build_layout_rois(
                     region.bbox[0],
                 ),
             )
-        )
-    ]
-
-
-def layout_regions_to_text_regions(
-    layout_regions: Sequence[LayoutRegion],
-    image_shape: Sequence[int],
-    *,
-    confidence_threshold: float = 0.20,
-    padding: int = 4,
-    allow_unknown: bool = False,
-) -> list[TextRegion]:
-    text_regions: list[TextRegion] = []
-    page_height = int(image_shape[0])
-    page_width = int(image_shape[1])
-    page_area = max(page_height * page_width, 1)
-
-    for region in layout_regions:
-        if float(region.score) < float(confidence_threshold):
-            continue
-
-        bbox = expand_bbox(region.bbox, image_shape, padding)
-        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            continue
-
-        area = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1)
-        area_ratio = area / page_area
-        label = (region.label or "").strip().lower()
-
-        is_text_like = is_pp_text_block_label(label)
-        is_figure_like = any(part in label for part in FIGURE_LIKE_LABEL_PARTS)
-        is_unknown = not label or label in {"unknown", "other", "layout"}
-
-        if is_figure_like and area_ratio >= 0.18:
-            continue
-        if label in {"background", "full_page"} and area_ratio >= 0.50:
-            continue
-        if label == "full_page":
-            continue
-        if not is_text_like:
-            if not allow_unknown or not is_unknown:
-                continue
-        if is_unknown and area_ratio >= 0.18:
-            continue
-        if area_ratio >= 0.35:
-            continue
-
-        width = max(1, bbox[2] - bbox[0])
-        height = max(1, bbox[3] - bbox[1])
-        text_regions.append(
-            TextRegion(
-                bbox=bbox,
-                score=region.score,
-                class_id=region.class_id,
-                mask=None,
-                text="",
-                confidence=region.score,
-                bubble_id=None,
-                reading_order=region.reading_order,
-                detector="pp_doclayout_v3",
-                source_direction=(
-                    "vertical"
-                    if height >= (width * 1.15)
-                    else "horizontal"
-                ),
-                detected_font_size_px=float(min(width, height)),
-            )
-        )
-
-    return [
-        region
-        for _, region in sorted(
-            enumerate(text_regions),
-            key=lambda item: (
-                item[1].reading_order if item[1].reading_order is not None else 10**9,
-                item[1].bbox[1],
-                item[1].bbox[0],
-                item[0],
-            ),
         )
     ]
 
@@ -864,6 +785,5 @@ __all__ = [
     "ensure_pp_doclayout_v3_available",
     "get_pp_doclayout_v3_detector",
     "is_pp_text_block_label",
-    "layout_regions_to_text_regions",
     "normalize_layout_detections",
 ]

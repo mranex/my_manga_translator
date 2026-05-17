@@ -721,7 +721,7 @@ def _render_item_sprite(
         auto_text_color, auto_stroke_color, auto_stroke_width = choose_text_color_for_region(
             image_bgr,
             render_bbox,
-            prefer_stroke=(kind == "outside_text"),
+            prefer_stroke=(kind == "layout_text"),
             is_dark=None,
         )
         resolved_text_color = resolved_text_color or auto_text_color
