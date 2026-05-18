@@ -6,7 +6,9 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-TEXT_LIKE_LAYOUT_LABEL_PARTS = ("text", "title", "caption", "content")
+TEXT_LIKE_LAYOUT_LABEL_PARTS = ("text", "title", "caption", "content", "letter")
+LAYOUT_BUBBLE_OWNERSHIP_OVERLAP_THRESHOLD = 0.50
+LAYOUT_BUBBLE_CENTER_MIN_OVERLAP_THRESHOLD = 0.25
 
 
 def build_ocr_items_from_detection(
@@ -15,20 +17,50 @@ def build_ocr_items_from_detection(
     *,
     logger: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    bubbles = [bubble for bubble in detection_data.get("bubbles", []) if not bool(bubble.get("excluded", False))]
+    raw_bubbles = detection_data.get("bubbles", [])
+    raw_layout_regions = detection_data.get("layout_regions", [])
+    bubbles = [bubble for bubble in raw_bubbles if not bool(bubble.get("excluded", False))]
     layout_regions = [
         layout_region
-        for layout_region in detection_data.get("layout_regions", [])
+        for layout_region in raw_layout_regions
         if not bool(layout_region.get("excluded", False))
     ]
 
     bubble_items: list[dict[str, Any]] = []
     layout_items: list[dict[str, Any]] = []
-    owned_layout_ids: set[int] = set()
     page_name = Path(str(detection_data.get("source_image", "") or "page")).name or "page"
+    excluded_layout_count = max(0, len(raw_layout_regions) - len(layout_regions))
+    non_text_target_count = 0
+    invalid_layout_count = 0
+    valid_text_target_layout_regions: list[dict[str, Any]] = []
+
+    for layout_region in sorted(
+        layout_regions,
+        key=lambda entry: sort_key_for_region(entry.get("bbox"), entry.get("reading_order")),
+    ):
+        if not is_text_target_layout_region(layout_region):
+            non_text_target_count += 1
+            continue
+        layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
+        if layout_bbox is None:
+            invalid_layout_count += 1
+            if logger is not None:
+                logger(
+                    "[ocr_items] Skipping layout region with invalid bbox "
+                    f"on {page_name}: bbox={layout_region.get('bbox')!r}"
+                )
+            continue
+        valid_text_target_layout_regions.append(layout_region)
+
+    bubble_layout_map, unowned_layout_regions = assign_layout_regions_to_bubbles(
+        valid_text_target_layout_regions,
+        bubbles,
+        image_shape,
+    )
 
     for bubble_index, bubble in enumerate(bubbles):
         bubble_id = _coerce_int(bubble.get("id"), bubble_index)
+        bubble_key = _bubble_bucket_key(bubble, bubble_index)
         bubble_bbox = clamp_bbox_to_image(bubble.get("bbox"), image_shape)
         if bubble_bbox is None:
             if logger is not None:
@@ -39,14 +71,11 @@ def build_ocr_items_from_detection(
                 )
             continue
 
-        matched_layout_regions = _layout_regions_for_bubble(layout_regions, bubble_bbox, image_shape)
+        matched_layout_regions = bubble_layout_map.get(bubble_key, [])
         matched_layout_bboxes = _clipped_layout_bboxes(matched_layout_regions, bubble_bbox, image_shape)
-        for layout_region in matched_layout_regions:
-            layout_id = _coerce_optional_int(layout_region.get("id"))
-            if layout_id is not None:
-                owned_layout_ids.add(layout_id)
 
         refined_bbox = union_bboxes(matched_layout_bboxes, image_shape)
+        has_owned_layout_regions = bool(matched_layout_regions)
         ocr_bbox = refined_bbox if refined_bbox is not None else bubble_bbox
         if ocr_bbox is None:
             continue
@@ -54,6 +83,10 @@ def build_ocr_items_from_detection(
         text_mask_bboxes = [bbox_to_list(bbox) for bbox in matched_layout_bboxes]
         if not text_mask_bboxes:
             text_mask_bboxes = [bbox_to_list(ocr_bbox)]
+            if logger is not None:
+                logger(
+                    "[ocr_items] Bubble has no owned layout regions; using bubble bbox fallback."
+                )
 
         bubble_items.append(
             {
@@ -66,15 +99,18 @@ def build_ocr_items_from_detection(
                 "reading_order": _min_reading_order(matched_layout_regions),
                 "detector_sources": unique_strings(
                     [
-                        bubble.get("detector"),
-                        *[layout_region.get("detector") or "pp_doclayout_v3" for layout_region in matched_layout_regions],
+                        bubble.get("detector") or bubble.get("source") or "yolov8_seg_bubble",
+                        *[
+                            layout_region.get("detector") or layout_region.get("source") or "pp_doclayout_v3"
+                            for layout_region in matched_layout_regions
+                        ],
                     ]
                 ),
                 "source_direction": infer_source_direction(ocr_bbox),
                 "layout_region_ids": _region_ids(matched_layout_regions),
                 "text_mask_bboxes": text_mask_bboxes,
-                "ocr_bbox_source": "layout_region",
-                "ocr_bbox_source_color": "purple",
+                "ocr_bbox_source": "layout_region" if has_owned_layout_regions else "bubble_fallback",
+                "ocr_bbox_source_color": "purple" if has_owned_layout_regions else "blue",
                 "text": "",
                 "status": "prepared",
                 "detector_refs": {
@@ -84,18 +120,7 @@ def build_ocr_items_from_detection(
             }
         )
 
-    for layout_region in sorted(
-        layout_regions,
-        key=lambda entry: sort_key_for_region(entry.get("bbox"), entry.get("reading_order")),
-    ):
-        label = str(layout_region.get("label") or "").strip().lower()
-        if not is_text_like_layout_label(label):
-            continue
-
-        layout_id = _coerce_optional_int(layout_region.get("id"))
-        if layout_id is not None and layout_id in owned_layout_ids:
-            continue
-
+    for layout_region in unowned_layout_regions:
         layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
         if layout_bbox is None:
             if logger is not None:
@@ -115,7 +140,9 @@ def build_ocr_items_from_detection(
                 "crop_path": None,
                 "bubble_id": None,
                 "reading_order": _coerce_optional_int(layout_region.get("reading_order")),
-                "detector_sources": unique_strings([layout_region.get("detector"), "pp_doclayout_v3"]),
+                "detector_sources": unique_strings(
+                    [layout_region.get("detector") or layout_region.get("source") or "pp_doclayout_v3"]
+                ),
                 "source_direction": infer_source_direction(layout_bbox),
                 "layout_region_ids": _region_ids([layout_region]),
                 "text_mask_bboxes": [bbox_to_list(layout_bbox)],
@@ -137,11 +164,21 @@ def build_ocr_items_from_detection(
         item["id"] = item_id
 
     if logger is not None:
+        assigned_layout_count = sum(len(regions) for regions in bubble_layout_map.values())
         logger(
             "Prepared OCR items from detection cache: "
             f"{len(bubble_items)} bubble, "
-            f"{len(layout_items)} layout_text"
+            f"{len(layout_items)} layout_text, "
+            f"{assigned_layout_count} layout_regions assigned to bubbles, "
+            f"{len(unowned_layout_regions)} layout_regions unowned"
         )
+        if excluded_layout_count or non_text_target_count or invalid_layout_count:
+            logger(
+                "[ocr_items] Skipped layout regions: "
+                f"{excluded_layout_count} excluded, "
+                f"{non_text_target_count} non-text-target, "
+                f"{invalid_layout_count} invalid bbox"
+            )
 
     return all_items
 
@@ -313,6 +350,14 @@ def is_text_like_layout_label(label: str) -> bool:
     return any(part in normalized for part in TEXT_LIKE_LAYOUT_LABEL_PARTS)
 
 
+def is_text_target_layout_region(layout_region: dict[str, Any]) -> bool:
+    detector = str(layout_region.get("detector") or layout_region.get("source") or "").strip().lower()
+    if detector in {"ogk_manga_rtdetr", "manual"}:
+        return True
+    label = str(layout_region.get("label") or "").strip().lower()
+    return is_text_like_layout_label(label)
+
+
 def infer_source_direction(bbox: tuple[int, int, int, int]) -> str:
     width = max(1, int(bbox[2]) - int(bbox[0]))
     height = max(1, int(bbox[3]) - int(bbox[1]))
@@ -323,16 +368,82 @@ def region_belongs_to_bubble(
     region_bbox: tuple[int, int, int, int],
     bubble_bbox: tuple[int, int, int, int],
 ) -> bool:
+    region_area = max(1, bbox_area(region_bbox))
+    overlap_ratio = bbox_intersection_area(region_bbox, bubble_bbox) / float(region_area)
     center_x = (float(region_bbox[0]) + float(region_bbox[2])) / 2.0
     center_y = (float(region_bbox[1]) + float(region_bbox[3])) / 2.0
-    if (
+    center_inside = (
         float(bubble_bbox[0]) <= center_x <= float(bubble_bbox[2])
         and float(bubble_bbox[1]) <= center_y <= float(bubble_bbox[3])
-    ):
+    )
+    if overlap_ratio >= LAYOUT_BUBBLE_OWNERSHIP_OVERLAP_THRESHOLD:
         return True
+    return center_inside and overlap_ratio >= LAYOUT_BUBBLE_CENTER_MIN_OVERLAP_THRESHOLD
 
-    region_area = max(1, bbox_area(region_bbox))
-    return (bbox_intersection_area(region_bbox, bubble_bbox) / float(region_area)) >= 0.50
+
+def assign_layout_regions_to_bubbles(
+    layout_regions: Sequence[dict[str, Any]],
+    bubbles: Sequence[dict[str, Any]],
+    image_shape: Sequence[int],
+) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
+    bubble_candidates: list[dict[str, Any]] = []
+    bubble_layout_map: dict[int, list[dict[str, Any]]] = {}
+    for bubble_index, bubble in enumerate(bubbles):
+        bubble_bbox = clamp_bbox_to_image(bubble.get("bbox"), image_shape)
+        if bubble_bbox is None:
+            continue
+        bubble_key = _bubble_bucket_key(bubble, bubble_index)
+        bubble_area = max(1, bbox_area(bubble_bbox))
+        bubble_candidates.append(
+            {
+                "key": bubble_key,
+                "index": bubble_index,
+                "bbox": bubble_bbox,
+                "area": bubble_area,
+            }
+        )
+        bubble_layout_map.setdefault(bubble_key, [])
+
+    unowned_layout_regions: list[dict[str, Any]] = []
+    for layout_region in layout_regions:
+        if bool(layout_region.get("excluded", False)):
+            continue
+        if not is_text_target_layout_region(layout_region):
+            continue
+        layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
+        if layout_bbox is None:
+            continue
+
+        best_candidate: dict[str, Any] | None = None
+        best_overlap_ratio = -1.0
+        for candidate in bubble_candidates:
+            overlap_ratio = _layout_bubble_overlap_ratio(layout_bbox, candidate["bbox"])
+            if not region_belongs_to_bubble(layout_bbox, candidate["bbox"]):
+                continue
+            if best_candidate is None:
+                best_candidate = candidate
+                best_overlap_ratio = overlap_ratio
+                continue
+            if overlap_ratio > best_overlap_ratio:
+                best_candidate = candidate
+                best_overlap_ratio = overlap_ratio
+                continue
+            if overlap_ratio < best_overlap_ratio:
+                continue
+            if int(candidate["area"]) < int(best_candidate["area"]):
+                best_candidate = candidate
+                continue
+            if int(candidate["area"]) == int(best_candidate["area"]) and int(candidate["index"]) < int(
+                best_candidate["index"]
+            ):
+                best_candidate = candidate
+
+        if best_candidate is None:
+            unowned_layout_regions.append(layout_region)
+            continue
+        bubble_layout_map.setdefault(int(best_candidate["key"]), []).append(layout_region)
+
+    return bubble_layout_map, unowned_layout_regions
 
 
 def _layout_regions_for_bubble(
@@ -342,8 +453,7 @@ def _layout_regions_for_bubble(
 ) -> list[dict[str, Any]]:
     matched_regions: list[dict[str, Any]] = []
     for layout_region in layout_regions:
-        label = str(layout_region.get("label") or "").strip().lower()
-        if not is_text_like_layout_label(label):
+        if not is_text_target_layout_region(layout_region):
             continue
         layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
         if layout_bbox is None:
@@ -382,6 +492,19 @@ def _region_ids(regions: Sequence[dict[str, Any]]) -> list[int]:
         if region_id is not None:
             region_ids.append(region_id)
     return region_ids
+
+
+def _bubble_bucket_key(bubble: dict[str, Any], bubble_index: int) -> int:
+    bubble_id = _coerce_optional_int(bubble.get("id"))
+    return bubble_id if bubble_id is not None else int(bubble_index)
+
+
+def _layout_bubble_overlap_ratio(
+    layout_bbox: tuple[int, int, int, int],
+    bubble_bbox: tuple[int, int, int, int],
+) -> float:
+    layout_area = max(1, bbox_area(layout_bbox))
+    return bbox_intersection_area(layout_bbox, bubble_bbox) / float(layout_area)
 
 
 def crop_image_to_bbox(image: Any, bbox: Sequence[int | float]) -> Any:
@@ -454,8 +577,10 @@ __all__ = [
     "crop_image_to_bbox",
     "expand_bbox",
     "infer_source_direction",
+    "is_text_target_layout_region",
     "intersect_bboxes",
     "is_text_like_layout_label",
+    "assign_layout_regions_to_bubbles",
     "region_belongs_to_bubble",
     "sort_key_for_region",
     "union_bboxes",

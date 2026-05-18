@@ -10,11 +10,14 @@ from typing import Any, Callable, Protocol, Sequence
 from .canon_overlap import resolve_largest_overlap_components
 from .image_io import ensure_path
 from .ocr_items import (
+    assign_layout_regions_to_bubbles,
     bbox_to_list,
     build_ocr_items_from_detection,
     clamp_bbox_to_image as _ocr_items_clamp_bbox_to_image,
     infer_source_direction,
     intersect_bboxes,
+    is_text_target_layout_region,
+    region_belongs_to_bubble as _ocr_items_region_belongs_to_bubble,
 )
 
 CANON_STATE_SCHEMA_VERSION = 1
@@ -768,7 +771,8 @@ def _build_disabled_bubble_item(
         return None
 
     bubble_id = _coerce_optional_int(bubble.get("id"))
-    matched_layout_regions = _matched_layout_regions_for_bubble(layout_regions, bubble_bbox, image_shape)
+    matched_layout_map, _ = assign_layout_regions_to_bubbles(layout_regions, [bubble], image_shape)
+    matched_layout_regions = matched_layout_map.get(bubble_id if bubble_id is not None else 0, [])
     matched_boxes = _matched_layout_boxes(matched_layout_regions, bubble_bbox, image_shape)
     ocr_bbox = _union_bboxes(matched_boxes) or list(bubble_bbox)
     text_mask_bboxes = matched_boxes or [list(ocr_bbox)]
@@ -795,7 +799,9 @@ def _build_disabled_bubble_item(
         },
         "metadata": {
             "detector": str(bubble.get("detector", "") or ""),
-            "detector_sources": [str(bubble.get("detector", "") or "yolov8_seg_bubble")],
+            "detector_sources": [
+                str(bubble.get("detector") or bubble.get("source") or "yolov8_seg_bubble")
+            ],
         },
     }
 
@@ -834,7 +840,9 @@ def _build_disabled_layout_item(
         },
         "metadata": {
             "detector": str(layout_region.get("detector", "") or ""),
-            "detector_sources": [str(layout_region.get("detector", "") or "pp_doclayout_v3")],
+            "detector_sources": [
+                str(layout_region.get("detector") or layout_region.get("source") or "pp_doclayout_v3")
+            ],
             "label": str(layout_region.get("label", "") or ""),
         },
     }
@@ -968,23 +976,11 @@ def _layout_region_belongs_to_bubble(
     layout_bbox: tuple[int, int, int, int],
     bubble_bbox: tuple[int, int, int, int],
 ) -> bool:
-    center_x = (float(layout_bbox[0]) + float(layout_bbox[2])) / 2.0
-    center_y = (float(layout_bbox[1]) + float(layout_bbox[3])) / 2.0
-    if (
-        float(bubble_bbox[0]) <= center_x <= float(bubble_bbox[2])
-        and float(bubble_bbox[1]) <= center_y <= float(bubble_bbox[3])
-    ):
-        return True
-    layout_area = max(1, (layout_bbox[2] - layout_bbox[0]) * (layout_bbox[3] - layout_bbox[1]))
-    overlap = max(0, min(layout_bbox[2], bubble_bbox[2]) - max(layout_bbox[0], bubble_bbox[0])) * max(
-        0, min(layout_bbox[3], bubble_bbox[3]) - max(layout_bbox[1], bubble_bbox[1])
-    )
-    return (overlap / float(layout_area)) >= 0.50
+    return _ocr_items_region_belongs_to_bubble(layout_bbox, bubble_bbox)
 
 
 def _is_text_like_layout_region(layout_region: dict[str, Any]) -> bool:
-    label = str(layout_region.get("label", "") or "").strip().lower()
-    return any(part in label for part in ("text", "title", "caption", "content"))
+    return is_text_target_layout_region(layout_region)
 
 
 def _ids_from_regions(regions: Sequence[dict[str, Any]]) -> list[int]:
