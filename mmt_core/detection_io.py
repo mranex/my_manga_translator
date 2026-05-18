@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
 from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult
+from .detection_config import DetectionConfig
 from .image_io import ensure_path, project_relative_path, save_png_image
 from .json_io import write_json_atomic
 
@@ -43,6 +44,7 @@ def save_detection_result(
     mask_output_dir: Path | str,
     project_root: Path | str | None = None,
     logger: Callable[[str], None] | None = None,
+    detection_config: DetectionConfig | dict[str, Any] | None = None,
 ) -> Path:
     """Serialize a detection result to JSON and any bubble masks to disk."""
 
@@ -63,6 +65,7 @@ def save_detection_result(
         "image_height": int(image_shape[0]),
         "method": str(result.method),
         "stats": _json_safe(result.stats),
+        "detection_config": DetectionConfig.from_value(detection_config).to_settings_dict(),
         "bubbles": [],
         "layout_regions": [],
     }
@@ -119,6 +122,8 @@ def load_detection_json(path: Path | str) -> dict[str, Any]:
     payload.setdefault("source_image", "")
     payload.setdefault("image_width", 0)
     payload.setdefault("image_height", 0)
+    detection_config = payload.get("detection_config")
+    payload["detection_config"] = detection_config if isinstance(detection_config, dict) else {}
     payload.setdefault("edited", False)
     payload.setdefault("edited_at", "")
     downstream_stale = payload.get("downstream_stale", [])
@@ -150,6 +155,7 @@ def save_detection_json(path: Path | str, data: dict[str, Any]) -> Path:
             "image_height": int(data.get("image_height", 0) or 0),
             "method": str(data.get("method", "") or ""),
             "stats": _json_safe(data.get("stats", {})),
+            "detection_config": DetectionConfig.from_value(data.get("detection_config", {})).to_settings_dict(),
             "bubbles": [_normalize_detection_region(item) for item in data.get("bubbles", []) if isinstance(item, dict)],
             "layout_regions": [
                 _normalize_detection_region(item)
@@ -177,7 +183,7 @@ def _serialize_bubble(
         "id": bubble_id,
         "bbox": _bbox_to_list(bubble.bbox),
         "confidence": float(bubble.score),
-        "detector": "yolov8_seg_bubble",
+        "detector": str(bubble.detector or "yolov8_seg_bubble"),
         "class_id": bubble.class_id,
         "is_dark": bool(bubble.is_dark),
         "mask_path": mask_path,
@@ -190,7 +196,7 @@ def _serialize_layout_region(layout_region: LayoutRegion, *, region_id: int) -> 
         "bbox": _bbox_to_list(layout_region.bbox),
         "confidence": float(layout_region.score),
         "label": layout_region.label,
-        "detector": "pp_doclayout_v3",
+        "detector": str(layout_region.detector or "pp_doclayout_v3"),
         "reading_order": layout_region.reading_order,
         "label_id": layout_region.label_id,
     }

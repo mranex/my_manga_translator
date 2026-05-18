@@ -109,6 +109,7 @@ def _full_page_layout_region(image_shape, *, label: str = "full_page", reading_o
         label=label,
         label_id=None,
         reading_order=reading_order,
+        detector="pp_doclayout_v3",
     )
 
 
@@ -205,6 +206,7 @@ def normalize_layout_detections(
                 label_id=label_id,
                 reading_order=None if reading_order is None else int(reading_order),
                 polygon_points=polygon_points,
+                detector="pp_doclayout_v3",
             )
         )
 
@@ -311,6 +313,7 @@ def build_layout_rois(
             if (existing.reading_order is not None or candidate.reading_order is not None)
             else None,
             polygon_points=existing.polygon_points or candidate.polygon_points,
+            detector=existing.detector or candidate.detector or "pp_doclayout_v3",
         )
 
     if not merged_rois:

@@ -192,6 +192,7 @@ def normalize_yolov8_segmentation_result(
                 class_id=class_id,
                 mask=full_mask.astype(np_module.uint8),
                 is_dark=detect_dark_bubble_from_mask(image, full_mask),
+                detector="yolov8_seg_bubble",
             )
         )
 

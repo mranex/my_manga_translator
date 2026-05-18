@@ -6,8 +6,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from mmt_core import DetectionConfig
 from mmt_core.crash_logging import write_crash_breadcrumb
-from mmt_gui.workers import DetectionTask
+from mmt_gui.workers import DetectionTask, MangaDetectorTask
 
 from .base_service import BaseService, ServiceCanceledError, WorkerSignalsBridge
 from .detection_runtime import (
@@ -34,6 +35,9 @@ class DetectionService(BaseService):
 
         self._runtime = DetectionRuntimeThread(
             workspace_root=self._workspace_root,
+            startup_detection_config=DetectionConfig.from_value(
+                self.startup_options.get("detection_config", {})
+            ),
             logger=lambda message: self._emit_log("info", message),
             status_callback=lambda message: self._emit_status("loading", message),
         )
@@ -72,6 +76,8 @@ class DetectionService(BaseService):
                 page_total=len(task.image_paths),
             )
             return self._run_detection_task(command, task, bridge)
+        if isinstance(task, MangaDetectorTask):
+            return self._run_manga_detector_task(command, task, bridge)
         if command.action == "reload_models":
             self.on_restart()
             return {"reloaded": True}
@@ -114,6 +120,7 @@ class DetectionService(BaseService):
                 event=bridge.event.emit,
             ),
             workspace_root=self._workspace_root,
+            detection_config=DetectionConfig.from_value(task.config),
         )
 
         write_crash_breadcrumb(
@@ -162,6 +169,44 @@ class DetectionService(BaseService):
             command_id=command.command_id,
             action=command.action,
         )
+        return outcome.result
+
+    def _run_manga_detector_task(
+        self,
+        command: ServiceCommand,
+        task: MangaDetectorTask,
+        bridge: WorkerSignalsBridge,
+    ) -> Any:
+        runtime = self._runtime
+        if runtime is None or not runtime.is_ready():
+            raise RuntimeError("Detection runtime is not ready. Restart the Detection service.")
+        if runtime.is_busy():
+            raise RuntimeError("Detection runtime is busy.")
+
+        request = DetectionRuntimeRequest(
+            command_id=command.command_id,
+            action=command.action,
+            image_paths=[],
+            detection_cache_dir=None,
+            masks_cache_dir=None,
+            force=False,
+            cancel_token=command.cancel_token,
+            callbacks=DetectionRuntimeCallbacks(
+                progress=bridge.progress.emit,
+                message=bridge.message.emit,
+                event=bridge.event.emit,
+            ),
+            workspace_root=self._workspace_root,
+            detection_config=DetectionConfig.from_value(task.config),
+        )
+        try:
+            outcome = runtime.submit_and_wait(request)
+        except DetectionRuntimeBusyError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if outcome.canceled:
+            raise ServiceCanceledError(outcome.error or "Manga detector command canceled.")
+        if outcome.error:
+            raise RuntimeError(outcome.error)
         return outcome.result
 
     def _status_payload(self) -> dict[str, Any]:

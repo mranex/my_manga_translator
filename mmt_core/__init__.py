@@ -9,6 +9,13 @@ from .detection_io import (
     save_detection_json,
     save_detection_result,
 )
+from .detection_config import (
+    DEFAULT_MANGA_MODEL_ID,
+    DETECTION_ENGINE_CLASSIC,
+    DETECTION_ENGINE_MANGA_RTDETR,
+    DetectionConfig,
+    detection_configs_match,
+)
 from .canon_state import (
     CANON_STATE_SCHEMA_VERSION,
     add_manual_canon_item,
@@ -211,7 +218,12 @@ __all__ = [
     "OUTPUT_FORMAT_CHOICES",
     "PAGE_SCOPE_CHOICES",
     "CANON_STATE_SCHEMA_VERSION",
+    "DEFAULT_MANGA_MODEL_ID",
     "detection_json_path",
+    "DETECTION_ENGINE_CLASSIC",
+    "DETECTION_ENGINE_MANGA_RTDETR",
+    "DetectionConfig",
+    "detection_configs_match",
     "add_manual_canon_item",
     "add_manual_detection_item",
     "canon_item_bbox",

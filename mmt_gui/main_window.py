@@ -32,6 +32,8 @@ from PyQt6.QtWidgets import (
 
 from mmt_core import (
     DEFAULT_OCR_PROVIDER,
+    DETECTION_ENGINE_MANGA_RTDETR,
+    DetectionConfig,
     ExportConfig,
     LlamaServerManager,
     OCRConfig,
@@ -130,6 +132,8 @@ from .workers import (
     InpaintWorkerResult,
     LamaModelTask,
     LamaModelTaskResult,
+    MangaDetectorTask,
+    MangaDetectorTaskResult,
     LlamaServerTask,
     LlamaServerTaskResult,
     OCRInferenceTask,
@@ -233,6 +237,8 @@ class MainWindow(QMainWindow):
         self._active_process_worker: TaskWorker | ServiceCommandHandle | None = None
         self._process_cancel_requested = False
         self._service_statuses: dict[str, ServiceStatusSnapshot] = {}
+        self._startup_detection_config = DetectionConfig.from_value(self.app_settings.panel_settings("detection"))
+        self._manga_status_bootstrap_pending = self._startup_detection_config.engine == DETECTION_ENGINE_MANGA_RTDETR
         self.service_manager: ServiceManager | None = None
         self.startup_overlay: StartupOverlay | None = None
 
@@ -282,6 +288,7 @@ class MainWindow(QMainWindow):
                 "preload_inpaint": self.app_settings.bool_value("services/preload_inpaint_on_startup", True),
                 "preload_render": self.app_settings.bool_value("services/preload_render_on_startup", True),
                 "inpaint_device": startup_inpaint_device,
+                "detection_config": self._startup_detection_config.to_settings_dict(),
             },
             parent=self,
         )
@@ -290,6 +297,8 @@ class MainWindow(QMainWindow):
             lambda message, level: self.log(message, level=str(level or "info"))
         )
         self.header.set_service_status_text("Services: starting...")
+        if self._startup_detection_config.engine == DETECTION_ENGINE_MANGA_RTDETR:
+            self.config_panel.set_manga_detector_status("Loading default Manga RT-DETR detector...")
         self.service_manager.start_services()
         self._show_startup_overlay()
 
@@ -779,6 +788,10 @@ class MainWindow(QMainWindow):
         self.render_panel.cancel_box_edits_requested.connect(self.cancel_render_box_edits)
         self.render_panel.exclude_selected_box_requested.connect(self.exclude_selected_render_item)
         self.render_panel.restore_selected_box_requested.connect(self.restore_selected_render_item)
+        self.config_panel.load_manga_detector_requested.connect(self.load_manga_detector)
+        self.config_panel.reload_manga_detector_requested.connect(self.reload_manga_detector)
+        self.config_panel.unload_manga_detector_requested.connect(self.unload_manga_detector)
+        self.config_panel.manga_detector_status_requested.connect(self.check_manga_detector_status)
         self.render_panel.show_excluded_items_toggled.connect(self._on_render_show_excluded_toggled)
         self.render_panel.reload_box_cache_requested.connect(self.reload_render_boxes_from_cache)
         self.render_panel.current_item_changed.connect(self._on_render_table_item_changed)
@@ -868,6 +881,7 @@ class MainWindow(QMainWindow):
                 auto_preview_result=self.left_toolbar.auto_preview_enabled(),
                 follow_batch_progress=self.left_toolbar.follow_batch_progress_enabled(),
             )
+            self.config_panel.apply_detection_settings(self.app_settings.panel_settings("detection"))
             self.config_panel.apply_ocr_settings(self.app_settings.panel_settings("ocr"))
             self.config_panel.apply_translation_settings(self.app_settings.panel_settings("translation"))
             inpaint_settings = self.app_settings.panel_settings("inpaint")
@@ -1027,6 +1041,7 @@ class MainWindow(QMainWindow):
 
     def _persist_panel_preferences(self) -> None:
         try:
+            self.app_settings.set_panel_settings("detection", self.config_panel.detection_settings_snapshot())
             self.app_settings.set_panel_settings("ocr", self.config_panel.ocr_settings_snapshot())
             self.app_settings.set_panel_settings("translation", self.config_panel.translation_settings_snapshot())
             self.app_settings.set_panel_settings("inpaint", self.config_panel.inpaint_settings_snapshot())
@@ -1911,6 +1926,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Inpaint preview cleared")
         self.log("Cleared inpaint preview overlay.")
 
+    def load_manga_detector(self) -> None:
+        self._start_manga_detector_task("load")
+
+    def reload_manga_detector(self) -> None:
+        self._start_manga_detector_task("reload")
+
+    def unload_manga_detector(self) -> None:
+        self._start_manga_detector_task("unload")
+
+    def check_manga_detector_status(self) -> None:
+        self._start_manga_detector_task("status")
+
     def load_lama_model(self) -> None:
         self._select_stage("inpaint")
         self._start_lama_model_task("load")
@@ -2031,6 +2058,16 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, ServiceStatusSnapshot):
             return
         self._service_statuses[payload.service_name] = payload
+        if payload.service_name == "detection":
+            if payload.state == "error":
+                self.config_panel.set_manga_detector_status("Error")
+            elif (
+                self._manga_status_bootstrap_pending
+                and payload.state in {"ready", "idle"}
+                and self.service_manager is not None
+            ):
+                self._manga_status_bootstrap_pending = False
+                QTimer.singleShot(0, lambda: self._start_manga_detector_task("status", select_stage=False))
         if hasattr(self, "process_panel"):
             self.process_panel.set_service_status(payload.service_name, payload.state, payload.message)
         if self.startup_overlay is not None:
@@ -2181,6 +2218,7 @@ class MainWindow(QMainWindow):
 
         inpaint_settings = self.current_inpaint_settings(force=force)
         return {
+            "detection_config": self.config_panel.detection_config(),
             "ocr_config": ocr_config,
             "translation_config": translation_config,
             "inpaint_settings": inpaint_settings,
@@ -3944,6 +3982,7 @@ class MainWindow(QMainWindow):
         *,
         scope: str,
         force: bool,
+        detection_config,
         ocr_config: OCRConfig,
         translation_config: TranslationConfig,
         inpaint_settings: dict[str, Any],
@@ -3975,6 +4014,7 @@ class MainWindow(QMainWindow):
             image_relative_paths=list(image_relative_paths),
             scope=scope,
             force=force,
+            detection_config=detection_config,
             ocr_config=ocr_config,
             translation_config=translation_config,
             inpaint_settings=dict(inpaint_settings),
@@ -4095,6 +4135,7 @@ class MainWindow(QMainWindow):
             detection_cache_dir=self.current_project.cache_dir / "detection",
             masks_cache_dir=self.current_project.cache_dir / "masks",
             force=force,
+            config=self.config_panel.detection_settings_snapshot(),
         )
         write_crash_breadcrumb(
             "MainWindow after creating DetectionTask",
@@ -4415,6 +4456,47 @@ class MainWindow(QMainWindow):
             return
         self.inpaint_panel.set_actions_enabled(False)
         self.header.set_progress_value(0)
+
+    def _start_manga_detector_task(self, action: str, *, select_stage: bool = True) -> None:
+        if select_stage:
+            self._select_stage("config")
+        task = MangaDetectorTask(
+            name=f"Manga detector: {action}",
+            stage="config",
+            action=action,
+            config=self.config_panel.detection_settings_snapshot(),
+        )
+        try:
+            self._submit_service_task(
+                task,
+                progress_label=None,
+                finished_handler=lambda result, active_worker: self._on_manga_detector_task_finished(
+                    result,
+                    active_worker,
+                    action,
+                ),
+                failed_handler=lambda message, active_worker: self._on_manga_detector_task_failed(
+                    message,
+                    active_worker,
+                    action,
+                ),
+            )
+        except Exception as exc:
+            self.config_panel.set_detection_controls_enabled(True)
+            self.show_error("Detection service unavailable", str(exc))
+            return
+
+        if action == "load":
+            self.config_panel.set_manga_detector_status("Loading...")
+        elif action == "reload":
+            self.config_panel.set_manga_detector_status("Reloading...")
+        elif action == "unload":
+            self.config_panel.set_manga_detector_status("Unloading...")
+        else:
+            self.config_panel.set_manga_detector_status("Checking status...")
+        self.config_panel.set_detection_controls_enabled(False)
+        self.header.set_progress_value(0)
+        self.statusBar().showMessage("Running Manga detector action...")
 
     def _start_render_preparation_task(
         self,
@@ -5582,6 +5664,49 @@ class MainWindow(QMainWindow):
         self.inpaint_panel.set_model_status("Error")
         self.statusBar().showMessage("LaMa model action failed")
         self.show_error("LaMa model error", message)
+
+    def _on_manga_detector_task_finished(
+        self,
+        result: object,
+        worker: TaskWorker,
+        action: str,
+    ) -> None:
+        self._finish_worker(worker)
+        self.config_panel.set_detection_controls_enabled(True)
+
+        if not isinstance(result, MangaDetectorTaskResult):
+            self.statusBar().showMessage("Manga detector action finished")
+            return
+
+        if result.error:
+            status_text = f"Error: {result.error}"
+        elif action == "status":
+            status_text = (
+                f"Loaded on {result.device or 'auto'}"
+                if result.loaded
+                else "Not loaded"
+            )
+        elif result.loaded:
+            status_text = f"Loaded on {result.device or 'auto'}"
+        else:
+            status_text = "Not loaded"
+
+        self.config_panel.set_manga_detector_status(status_text)
+        self.statusBar().showMessage(result.message)
+        self.log(result.message)
+
+    def _on_manga_detector_task_failed(
+        self,
+        message: str,
+        worker: TaskWorker,
+        action: str,
+    ) -> None:
+        del action
+        self._finish_worker(worker)
+        self.config_panel.set_detection_controls_enabled(True)
+        self.config_panel.set_manga_detector_status("Error")
+        self.statusBar().showMessage("Manga detector action failed")
+        self.show_error("Manga detector error", message)
 
     def _on_render_prep_worker_finished(self, result: object, worker: TaskWorker) -> None:
         self._finish_worker(worker)

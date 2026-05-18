@@ -62,6 +62,7 @@ class DetectionTask(PipelineTask):
     detection_cache_dir: Path = Path(".")
     masks_cache_dir: Path = Path(".")
     force: bool = False
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -86,6 +87,26 @@ class DetectionWorkerResult:
     @property
     def failures(self) -> list[DetectionPageResult]:
         return [result for result in self.page_results if result.error is not None]
+
+
+@dataclass(slots=True)
+class MangaDetectorTask(PipelineTask):
+    """Configuration for Manga RT-DETR detector lifecycle actions."""
+
+    action: str = "status"
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class MangaDetectorTaskResult:
+    """Structured result for a Manga RT-DETR detector lifecycle action."""
+
+    loaded: bool
+    device: str
+    model_id: str
+    message: str
+    detection_config: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
 
 
 @dataclass(slots=True)
@@ -449,6 +470,7 @@ class ProcessTask(PipelineTask):
     force: bool = False
     ocr_config: Any = None
     translation_config: Any = None
+    detection_config: Any = None
     inpaint_settings: dict[str, Any] = field(default_factory=dict)
     render_config: Any = None
     cancel_token: Any = None
@@ -625,6 +647,7 @@ def _run_detection_task(task: PipelineTask, signals: WorkerSignals) -> Detection
                 task.detection_cache_dir,
                 task.masks_cache_dir,
                 force=task.force,
+                detection_config=task.config,
                 logger=signals.message.emit,
             )
         except Exception as exc:
@@ -1767,6 +1790,7 @@ def _run_process_task(
         task.image_relative_paths,
         scope=task.scope,
         force=task.force,
+        detection_config=task.detection_config,
         ocr_config=task.ocr_config,
         translation_config=task.translation_config,
         inpaint_settings=task.inpaint_settings,

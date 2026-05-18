@@ -9,12 +9,13 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from mmt_core import DetectionConfig, detection_configs_match, load_detection_json
 from mmt_core.crash_logging import write_crash_breadcrumb
 from mmt_core.detection_engine import DetectionEngine
 from mmt_core.detection_io import save_detection_result
 from mmt_core.image_io import ensure_path, load_image_bgr
 from mmt_core.runtime_diagnostics import resolve_runtime_diagnostics_path, write_runtime_diagnostic
-from mmt_gui.workers import DetectionPageResult, DetectionWorkerResult
+from mmt_gui.workers import DetectionPageResult, DetectionWorkerResult, MangaDetectorTaskResult
 
 from .models import CancelToken
 
@@ -46,12 +47,13 @@ class DetectionRuntimeRequest:
     command_id: str
     action: str
     image_paths: list[Path]
-    detection_cache_dir: Path
-    masks_cache_dir: Path
+    detection_cache_dir: Path | None
+    masks_cache_dir: Path | None
     force: bool
     cancel_token: CancelToken
     callbacks: DetectionRuntimeCallbacks
     workspace_root: Path
+    detection_config: DetectionConfig = field(default_factory=DetectionConfig)
 
 
 @dataclass(slots=True)
@@ -73,10 +75,12 @@ class DetectionRuntimeThread:
         self,
         *,
         workspace_root: Path,
+        startup_detection_config: DetectionConfig | dict[str, Any] | None = None,
         logger: LoggerCallback = None,
         status_callback: StatusCallback = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
+        self._startup_detection_config = DetectionConfig.from_value(startup_detection_config)
         self._logger = logger
         self._status_callback = status_callback
         self._thread: threading.Thread | None = None
@@ -127,7 +131,7 @@ class DetectionRuntimeThread:
 
     def is_ready(self) -> bool:
         with self._lock:
-            return self._ready and not self._startup_error and self._engine is not None and self._engine.is_ready()
+            return self._ready and not self._startup_error and self._engine is not None
 
     def is_busy(self) -> bool:
         with self._lock:
@@ -179,22 +183,18 @@ class DetectionRuntimeThread:
         try:
             self._engine = DetectionEngine()
             write_crash_breadcrumb("DetectionRuntimeThread preload started")
-            self._emit_status("Preloading detection models...")
+            self._emit_status("Preloading detection engine...")
             self._engine.preload(
+                self._startup_detection_config,
                 logger=self._startup_log,
                 status_callback=self._emit_status,
             )
-            if not self._engine.is_ready():
-                missing = ", ".join(self._engine.missing_detectors()) or "unknown detectors"
-                raise RuntimeError(
-                    "Detection resident models failed to load. "
-                    f"Missing resident detectors: {missing}. "
-                    "Active detection requires PPLayout and YOLO bubble detectors."
-                )
             if self._engine.bubble_detector is not None:
                 write_crash_breadcrumb("DetectionRuntimeThread YOLO loaded")
             if self._engine.layout_detector is not None:
                 write_crash_breadcrumb("DetectionRuntimeThread PPLayout loaded")
+            if self._engine.manga_detector_status().get("loaded", False):
+                write_crash_breadcrumb("DetectionRuntimeThread manga detector loaded")
             write_crash_breadcrumb("DetectionRuntimeThread preload done")
             write_crash_breadcrumb("DetectionRuntimeThread runtime ready")
             self._startup_log("Detection runtime is ready.")
@@ -251,9 +251,17 @@ class DetectionRuntimeThread:
             self._cleanup_runtime()
             write_crash_breadcrumb("DetectionRuntimeThread thread stopped")
 
-    def _execute_request(self, request: DetectionRuntimeRequest) -> DetectionWorkerResult:
+    def _execute_request(self, request: DetectionRuntimeRequest) -> Any:
         if self._engine is None or not self._engine.is_ready():
             raise RuntimeError("Detection runtime is not ready.")
+
+        if request.action in {
+            "load_manga_detector",
+            "reload_manga_detector",
+            "unload_manga_detector",
+            "manga_detector_status",
+        }:
+            return self._execute_manga_detector_request(request)
 
         callbacks = request.callbacks
         total_pages = len(request.image_paths)
@@ -265,6 +273,7 @@ class DetectionRuntimeThread:
             action=request.action,
             page_total=total_pages,
         )
+        self._engine.ensure_detection_ready(request.detection_config, logger=callbacks.message)
         callbacks.message(f"Starting detection for {total_pages} page(s).")
         callbacks.progress(0)
         self._write_task_diag(
@@ -386,8 +395,20 @@ class DetectionRuntimeThread:
         )
 
         if not request.force and detection_json_path.exists():
-            callbacks.message(f"Reusing cached detection for {source_image_path.name}")
-            return detection_json_path
+            cached_payload: dict[str, Any] | None = None
+            try:
+                cached_payload = load_detection_json(detection_json_path)
+            except Exception:
+                cached_payload = None
+            if detection_configs_match(
+                request.detection_config,
+                (cached_payload or {}).get("detection_config"),
+            ):
+                callbacks.message(f"Reusing cached detection for {source_image_path.name}")
+                return detection_json_path
+            callbacks.message(
+                f"Detection config changed for {source_image_path.name}. Regenerating detection cache."
+            )
 
         callbacks.message(f"Loading image for detection: {source_image_path.name}")
         write_crash_breadcrumb("DetectionRuntimeThread before load image", page=source_image_path.name)
@@ -419,6 +440,7 @@ class DetectionRuntimeThread:
         )
         result = self._engine.detect_image(
             image,
+            detection_config=request.detection_config,
             logger=callbacks.message,
             diagnostics_path=diagnostics_path,
             page_name=source_image_path.name,
@@ -447,6 +469,7 @@ class DetectionRuntimeThread:
             detection_json_output_path=detection_json_path,
             mask_output_dir=page_mask_dir,
             project_root=project_root,
+            detection_config=request.detection_config,
             logger=callbacks.message,
         )
         write_crash_breadcrumb("DetectionRuntimeThread after save_detection_result", page=source_image_path.name)
@@ -459,6 +482,37 @@ class DetectionRuntimeThread:
         )
         callbacks.message(f"Saved detection cache: {output_path}")
         return output_path
+
+    def _execute_manga_detector_request(self, request: DetectionRuntimeRequest) -> MangaDetectorTaskResult:
+        if self._engine is None:
+            raise RuntimeError("Detection runtime is not initialized.")
+
+        callbacks = request.callbacks
+        config = DetectionConfig.from_value(request.detection_config)
+        callbacks.progress(0)
+
+        if request.action == "load_manga_detector":
+            callbacks.message("Loading Manga RT-DETR detector...")
+            payload = self._engine.load_manga_detector(config, logger=callbacks.message)
+        elif request.action == "reload_manga_detector":
+            callbacks.message("Reloading Manga RT-DETR detector...")
+            payload = self._engine.reload_manga_detector(config, logger=callbacks.message)
+        elif request.action == "unload_manga_detector":
+            callbacks.message("Unloading Manga RT-DETR detector...")
+            payload = self._engine.unload_manga_detector()
+        else:
+            callbacks.message("Checking Manga RT-DETR detector status...")
+            payload = self._engine.manga_detector_status()
+
+        callbacks.progress(100)
+        return MangaDetectorTaskResult(
+            loaded=bool(payload.get("loaded", False)),
+            device=str(payload.get("device", "") or ""),
+            model_id=str(payload.get("model_id", config.manga_model_id) or config.manga_model_id),
+            message=str(payload.get("message", "") or ""),
+            detection_config=dict(payload.get("detection_config", {}) or {}),
+            error=str(payload.get("error", "") or ""),
+        )
 
     def _write_task_diag(
         self,

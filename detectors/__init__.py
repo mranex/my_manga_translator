@@ -11,6 +11,7 @@ from .matching import (
     point_in_bbox,
     point_in_mask,
 )
+from .ogk_manga_rtdetr import OgkMangaRTDetrDetector, OgkMangaRTDetrManager
 from .pp_doclayout_v3 import PPDocLayoutV3Detector
 
 
@@ -129,5 +130,7 @@ __all__ = [
     "point_in_mask",
     "get_pp_doclayout_v3_detector",
     "get_yolov8_seg_bubble_detector",
+    "OgkMangaRTDetrDetector",
+    "OgkMangaRTDetrManager",
     "PPDocLayoutV3Detector",
 ]

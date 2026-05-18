@@ -17,6 +17,7 @@ from mmt_gui.workers import (
     InpaintMaskTask,
     InpaintTask,
     LamaModelTask,
+    MangaDetectorTask,
     OCRInferenceTask,
     OCRPreparationTask,
     ProcessTask,
@@ -257,6 +258,7 @@ class ServiceManager(QObject):
             "preload_inpaint": bool(self.startup_options.get("preload_inpaint", True)),
             "preload_render": bool(self.startup_options.get("preload_render", True)),
             "device": str(self.startup_options.get("inpaint_device", "") or ""),
+            "detection_config": dict(self.startup_options.get("detection_config", {}) or {}),
             "workspace_root": str(self.workspace_root),
         }
 
@@ -396,6 +398,15 @@ class ServiceManager(QObject):
     def _resolve_service_action(self, task: Any) -> tuple[str, str]:
         if isinstance(task, DetectionTask):
             return "detection", "detect_page" if len(task.image_paths) <= 1 else "detect_pages"
+        if isinstance(task, MangaDetectorTask):
+            action = str(task.action or "").strip().lower()
+            if action == "load":
+                return "detection", "load_manga_detector"
+            if action == "reload":
+                return "detection", "reload_manga_detector"
+            if action == "unload":
+                return "detection", "unload_manga_detector"
+            return "detection", "manga_detector_status"
         if isinstance(task, OCRPreparationTask):
             return "ocr", "prepare_page" if len(task.image_relative_paths) <= 1 else "prepare_pages"
         if isinstance(task, OCRInferenceTask):

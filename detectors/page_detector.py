@@ -35,6 +35,7 @@ def detect_page_regions_layout_first(
         layout_regions=layout_regions,
         method="pp_doclayout_v3+yolov8_seg_bubble",
         stats={
+            "engine": "classic",
             "raw_bubbles": getattr(active_bubble_detector, "last_raw_bubble_count", len(raw_bubbles)),
             "merged_bubbles": getattr(active_bubble_detector, "last_merged_bubble_count", len(bubbles)),
             "raw_layout_regions": len(layout_regions),

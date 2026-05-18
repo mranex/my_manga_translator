@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from mmt_core import OCRConfig, RenderConfig, TranslationConfig
+from mmt_core import DetectionConfig, OCRConfig, RenderConfig, TranslationConfig, detection_configs_match
 from mmt_core.process_stage import (
     PROCESS_PIPELINE_STEPS,
     ProcessPageFailure,
@@ -15,6 +15,8 @@ from mmt_gui.workers import (
     DetectionTask,
     InpaintMaskTask,
     InpaintTask,
+    MangaDetectorTask,
+    MangaDetectorTaskResult,
     OCRInferenceTask,
     OCRPreparationTask,
     ProcessTask,
@@ -99,6 +101,8 @@ class ProcessService(BaseService):
                 active_paths = [page for page in ordered_paths if page not in failed_pages]
                 skipped_count = total_pages - len(active_paths)
                 step_progress_base = (step_index - 1) * total_pages
+                if step.key == "detection":
+                    self._preflight_detection_step(task, command)
 
                 if not active_paths:
                     step_statuses[step.key] = "skipped"
@@ -301,6 +305,7 @@ class ProcessService(BaseService):
                 detection_cache_dir=project.cache_dir / "detection",
                 masks_cache_dir=project.cache_dir / "masks",
                 force=bool(process_task.force),
+                config=DetectionConfig.from_value(process_task.detection_config).to_settings_dict(),
             )
         if step_key == "ocr_prepare":
             return OCRPreparationTask(
@@ -387,6 +392,27 @@ class ProcessService(BaseService):
                 force=render_config.force,
             )
         raise RuntimeError(f"Unsupported process step: {step_key}")
+
+    def _preflight_detection_step(self, process_task: ProcessTask, command: ServiceCommand) -> None:
+        detection_config = DetectionConfig.from_value(process_task.detection_config)
+        if detection_config.engine != "manga_rtdetr":
+            return
+        status_task = MangaDetectorTask(
+            name="Manga detector status",
+            stage="config",
+            action="status",
+            config=detection_config.to_settings_dict(),
+        )
+        service_result = self._sync_dispatch(status_task, command)
+        status_result = service_result.result
+        if not isinstance(status_result, MangaDetectorTaskResult) or not status_result.loaded:
+            raise RuntimeError(
+                "Manga RT-DETR detector is not loaded. Open Config and click Load Manga Detector first."
+            )
+        if not detection_configs_match(detection_config, status_result.detection_config):
+            raise RuntimeError(
+                "Manga RT-DETR detector config changed. Reload Manga Detector in Config before running Detection."
+            )
 
     def _summarize_stage_result(self, service_result: ServiceCommandResult) -> dict[str, Any]:
         result = service_result.result

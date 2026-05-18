@@ -23,10 +23,12 @@ class Region:
     score: float = 1.0
     class_id: int | None = None
     mask: Any | None = None
+    detector: str = ""
 
     def __post_init__(self) -> None:
         self.bbox = _coerce_bbox_to_int(self.bbox)
         self.score = float(self.score)
+        self.detector = str(self.detector or "")
         if self.class_id is not None:
             self.class_id = int(self.class_id)
 

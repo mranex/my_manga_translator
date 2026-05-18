@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .detection_config import DetectionConfig
 from .detection_stage import run_detection_for_image
 from .inpaint_stage import prepare_inpaint_mask_for_page, run_inpaint_for_page
 from .ocr_models import OCRConfig
@@ -125,6 +126,7 @@ def run_process_pipeline(
     *,
     scope: str = "chapter",
     force: bool = False,
+    detection_config: DetectionConfig | dict[str, Any] | None = None,
     ocr_config: OCRConfig | dict[str, Any] | None = None,
     translation_config: TranslationConfig | dict[str, Any] | None = None,
     inpaint_settings: dict[str, Any] | None = None,
@@ -149,6 +151,7 @@ def run_process_pipeline(
     normalized_scope = "current" if str(scope or "").strip().lower() == "current" else "chapter"
     continue_on_page_error = normalized_scope == "chapter"
 
+    normalized_detection_config = DetectionConfig.from_value(detection_config)
     normalized_ocr_config = validate_ocr_provider_config(ocr_config)
     normalized_translation_config = validate_translation_config(translation_config, logger=logger)
     normalized_inpaint_settings = _normalize_inpaint_settings(inpaint_settings, force=force)
@@ -276,6 +279,7 @@ def run_process_pipeline(
                 step,
                 active_paths,
                 force=bool(force),
+                detection_config=normalized_detection_config,
                 ocr_config=normalized_ocr_config,
                 translation_config=normalized_translation_config,
                 inpaint_settings=normalized_inpaint_settings,
@@ -393,6 +397,7 @@ def _run_sequential_step(
     active_paths: list[str],
     *,
     force: bool,
+    detection_config: DetectionConfig,
     ocr_config: OCRConfig,
     translation_config: TranslationConfig,
     inpaint_settings: dict[str, Any],
@@ -441,6 +446,7 @@ def _run_sequential_step(
                     step.key,
                     image_relative_path,
                     force=force,
+                    detection_config=detection_config,
                     ocr_config=ocr_config,
                     ocr_provider=ocr_provider,
                     translation_config=translation_config,
@@ -610,6 +616,7 @@ def _run_step_for_page(
     image_relative_path: str,
     *,
     force: bool,
+    detection_config: DetectionConfig,
     ocr_config: OCRConfig,
     ocr_provider,
     translation_config: TranslationConfig,
@@ -626,6 +633,7 @@ def _run_step_for_page(
             project.cache_dir / "detection",
             project.cache_dir / "masks",
             force=force,
+            detection_config=detection_config,
             logger=logger,
         )
         return {"output_path": str(output_path)}
