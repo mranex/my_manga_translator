@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .canon_state import canon_item_bbox, ensure_canon_state, get_canon_item, resolve_canon_item_for_stage_item
+from .canon_state import (
+    CANON_STATE_SCHEMA_VERSION,
+    canon_item_bbox,
+    ensure_canon_state,
+    get_canon_item,
+    resolve_canon_item_for_stage_item,
+)
 from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import load_image_bgr, project_relative_path, save_png_image
 from .ocr_image_preprocess import (
@@ -69,9 +75,9 @@ def prepare_ocr_items_for_image(
 
     _log(logger, f"Loading source image for OCR prep: {source_image_path.name}")
     image = load_image_bgr(source_image_path)
-    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    existing_canon_schema = _canon_state_schema_version(detection_data.get("canon_state"))
     ensure_canon_state(detection_data, image_shape=image.shape)
-    if not had_canon_state:
+    if existing_canon_schema != CANON_STATE_SCHEMA_VERSION:
         save_detection_json(detection_path, detection_data)
 
     _log(logger, f"Preparing OCR items from canon_state: {relative_path.name}")
@@ -141,9 +147,9 @@ def run_ocr_for_page(
 
     payload["items"] = [normalize_ocr_item(item) for item in raw_items]
     detection_data = load_detection_json(detection_path)
-    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    existing_canon_schema = _canon_state_schema_version(detection_data.get("canon_state"))
     ensure_canon_state(detection_data)
-    if not had_canon_state:
+    if existing_canon_schema != CANON_STATE_SCHEMA_VERSION:
         save_detection_json(detection_path, detection_data)
     canon_state = detection_data["canon_state"]
 
@@ -499,6 +505,15 @@ def _timestamp() -> str:
 def _log(logger: Callable[[str], None] | None, message: str) -> None:
     if logger is not None:
         logger(message)
+
+
+def _canon_state_schema_version(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return int(value.get("schema_version"))
+    except Exception:
+        return None
 
 
 __all__ = ["prepare_ocr_items_for_image", "run_ocr_for_page"]

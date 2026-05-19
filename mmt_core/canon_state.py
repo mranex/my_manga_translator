@@ -10,7 +10,6 @@ from typing import Any, Callable, Protocol, Sequence
 from .canon_overlap import resolve_largest_overlap_components
 from .image_io import ensure_path
 from .ocr_items import (
-    assign_layout_regions_to_bubbles,
     bbox_to_list,
     build_ocr_items_from_detection,
     clamp_bbox_to_image as _ocr_items_clamp_bbox_to_image,
@@ -20,7 +19,7 @@ from .ocr_items import (
     region_belongs_to_bubble as _ocr_items_region_belongs_to_bubble,
 )
 
-CANON_STATE_SCHEMA_VERSION = 1
+CANON_STATE_SCHEMA_VERSION = 2
 MIN_BOX_SIZE = 4
 _CANON_ID_PREFIX = "item_"
 
@@ -120,7 +119,7 @@ def ensure_canon_state(
         image_height=detection_json.get("image_height"),
     )
     raw_canon_state = detection_json.get("canon_state")
-    if not isinstance(raw_canon_state, dict):
+    if _canon_state_schema_version(raw_canon_state) != CANON_STATE_SCHEMA_VERSION:
         detection_json["canon_state"] = build_canon_state_from_detection(
             detection_json,
             image_shape=(image_height, image_width, 3),
@@ -147,9 +146,9 @@ def load_canon_state_for_page(project: ProjectLike, image_relative_path: Path | 
     from .detection_io import load_detection_json, save_detection_json
 
     detection_data = load_detection_json(detection_path)
-    had_canon_state = isinstance(detection_data.get("canon_state"), dict)
+    existing_schema = _canon_state_schema_version(detection_data.get("canon_state"))
     ensure_canon_state(detection_data)
-    if not had_canon_state:
+    if existing_schema != CANON_STATE_SCHEMA_VERSION:
         save_detection_json(detection_path, detection_data)
     return deepcopy(detection_data["canon_state"])
 
@@ -193,7 +192,6 @@ def build_canon_state_from_detection(
     active_items = resolve_largest_overlap_components(active_items, resolved_shape, logger=logger)
 
     canon_items: list[dict[str, Any]] = []
-    used_bubble_ids: set[int] = set()
     used_layout_region_ids: set[int] = set()
     next_index = 0
 
@@ -206,31 +204,11 @@ def build_canon_state_from_detection(
             enabled=not bool(workflow_item.get("excluded", False)),
         )
         canon_items.append(canon_item)
-        bubble_id = _coerce_optional_int(canon_item.get("detector_refs", {}).get("bubble_id"))
-        if bubble_id is not None:
-            used_bubble_ids.add(bubble_id)
         for layout_region_id in canon_item.get("detector_refs", {}).get("layout_region_ids", []):
             resolved_id = _coerce_optional_int(layout_region_id)
             if resolved_id is not None:
                 used_layout_region_ids.add(resolved_id)
         next_index += 1
-
-    for bubble in bubbles:
-        if not bool(bubble.get("excluded", False)):
-            continue
-        bubble_id = _coerce_optional_int(bubble.get("id"))
-        if bubble_id is not None and bubble_id in used_bubble_ids:
-            continue
-        canon_item = _build_disabled_bubble_item(
-            bubble,
-            layout_regions=layout_regions,
-            canon_index=next_index,
-            image_width=image_width,
-            image_height=image_height,
-        )
-        if canon_item is not None:
-            canon_items.append(canon_item)
-            next_index += 1
 
     for layout_region in layout_regions:
         if not bool(layout_region.get("excluded", False)):
@@ -757,55 +735,6 @@ def _build_canon_item_from_workflow_item(
     }
 
 
-def _build_disabled_bubble_item(
-    bubble: dict[str, Any],
-    *,
-    layout_regions: Sequence[dict[str, Any]],
-    canon_index: int,
-    image_width: int,
-    image_height: int,
-) -> dict[str, Any] | None:
-    image_shape = (image_height, image_width, 3)
-    bubble_bbox = _sanitize_bbox(bubble.get("bbox"), image_width=image_width, image_height=image_height)
-    if bubble_bbox is None:
-        return None
-
-    bubble_id = _coerce_optional_int(bubble.get("id"))
-    matched_layout_map, _ = assign_layout_regions_to_bubbles(layout_regions, [bubble], image_shape)
-    matched_layout_regions = matched_layout_map.get(bubble_id if bubble_id is not None else 0, [])
-    matched_boxes = _matched_layout_boxes(matched_layout_regions, bubble_bbox, image_shape)
-    ocr_bbox = _union_bboxes(matched_boxes) or list(bubble_bbox)
-    text_mask_bboxes = matched_boxes or [list(ocr_bbox)]
-
-    return {
-        "canon_id": f"{_CANON_ID_PREFIX}{canon_index:04d}",
-        "kind": "bubble",
-        "enabled": False,
-        "excluded": True,
-        "manual": bool(bubble.get("manual", False)),
-        "source": "manual" if bool(bubble.get("manual", False)) else "detector",
-        "bbox": list(bubble_bbox),
-        "ocr_bbox": list(ocr_bbox),
-        "render_bbox": list(bubble_bbox),
-        "bbox_user_edited": False,
-        "ocr_bbox_user_edited": False,
-        "render_bbox_user_edited": False,
-        "text_mask_bboxes": text_mask_bboxes,
-        "source_direction": infer_source_direction(tuple(ocr_bbox)),
-        "reading_order": None,
-        "detector_refs": {
-            "bubble_id": bubble_id,
-            "layout_region_ids": _ids_from_regions(matched_layout_regions),
-        },
-        "metadata": {
-            "detector": str(bubble.get("detector", "") or ""),
-            "detector_sources": [
-                str(bubble.get("detector") or bubble.get("source") or "yolov8_seg_bubble")
-            ],
-        },
-    }
-
-
 def _build_disabled_layout_item(
     layout_region: dict[str, Any],
     *,
@@ -911,21 +840,6 @@ def _derive_text_mask_bboxes_for_item(
 
     if matched_boxes:
         return matched_boxes
-    return _fallback_bubble_mask_boxes(item, image_width=image_width, image_height=image_height)
-
-
-def _fallback_bubble_mask_boxes(
-    item: dict[str, Any],
-    *,
-    image_width: int,
-    image_height: int,
-) -> list[list[int]]:
-    bbox = _sanitize_bbox(item.get("bbox"), image_width=image_width, image_height=image_height)
-    ocr_bbox = _sanitize_bbox(item.get("ocr_bbox"), image_width=image_width, image_height=image_height)
-    if bbox is None or ocr_bbox is None:
-        return []
-    if _is_conservative_sub_bbox(ocr_bbox, bbox) or ocr_bbox == bbox:
-        return [list(ocr_bbox)]
     return []
 
 
@@ -1150,6 +1064,12 @@ def _is_conservative_sub_bbox(candidate_bbox: list[int], container_bbox: list[in
     candidate_area = max(1, (candidate_key[2] - candidate_key[0]) * (candidate_key[3] - candidate_key[1]))
     container_area = max(1, (container_key[2] - container_key[0]) * (container_key[3] - container_key[1]))
     return candidate_area <= container_area
+
+
+def _canon_state_schema_version(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    return _coerce_optional_int(value.get("schema_version"))
 
 
 def _timestamp() -> str:

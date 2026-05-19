@@ -46,7 +46,7 @@ def resolve_largest_overlap_components(
         candidate_count += len(candidate_indices)
         grouped_components.extend(
             component
-            for component in _connected_components(candidate_indices, indexed_boxes)
+            for component in _connected_components(candidate_indices, indexed_boxes, resolved_items)
             if len(component) > 1
         )
 
@@ -142,14 +142,48 @@ def _should_connect(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) 
     return _center_inside(b, a)
 
 
+def _items_can_overlap_merge(
+    *,
+    left_item: dict[str, Any],
+    right_item: dict[str, Any],
+) -> bool:
+    left_ids = _layout_region_id_set(left_item)
+    right_ids = _layout_region_id_set(right_item)
+    if left_ids and right_ids:
+        return not left_ids.isdisjoint(right_ids)
+    return True
+
+
+def _layout_region_id_set(item: dict[str, Any]) -> set[int]:
+    detector_refs = item.get("detector_refs", {})
+    if not isinstance(detector_refs, dict):
+        return set()
+    layout_region_ids = detector_refs.get("layout_region_ids", [])
+    if not isinstance(layout_region_ids, list):
+        return set()
+    resolved: set[int] = set()
+    for value in layout_region_ids:
+        try:
+            resolved.add(int(value))
+        except Exception:
+            continue
+    return resolved
+
+
 def _connected_components(
     candidate_indices: Sequence[int],
     indexed_boxes: dict[int, tuple[int, int, int, int]],
+    resolved_items: Sequence[dict[str, Any]],
 ) -> list[list[int]]:
     adjacency: dict[int, set[int]] = {index: set() for index in candidate_indices}
     for left_offset, left_index in enumerate(candidate_indices):
         left_box = indexed_boxes[left_index]
         for right_index in candidate_indices[left_offset + 1 :]:
+            if not _items_can_overlap_merge(
+                left_item=resolved_items[left_index],
+                right_item=resolved_items[right_index],
+            ):
+                continue
             right_box = indexed_boxes[right_index]
             if not _should_connect(left_box, right_box):
                 continue
