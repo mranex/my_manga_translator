@@ -675,8 +675,7 @@ class PaddleOCRVLOCR:
 
         if not self.auto_start_server:
             raise PaddleOCRVLError(
-                "PaddleOCR-VL server is not reachable. Set PADDLEOCR_VL_SERVER_URL to a running llama.cpp server "
-                "or enable auto_start_server with LLAMA_CPP_DIR / model paths configured."
+                "Local OCR server is not reachable. Start run_server.bat and check health first."
             )
 
         self._server_command = self._build_server_command()

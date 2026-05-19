@@ -70,8 +70,8 @@ class DeepSeekOCRClient:
             last_error = f"{endpoint} returned HTTP {response.status_code}."
 
         raise DeepSeekOCRClientError(
-            "DeepSeek OCR server is not reachable. "
-            "Start the llama.cpp server from the OCR tab first. "
+            "Local OCR server is not reachable. "
+            "Start run_server.bat and check health first. "
             f"{last_error}"
         )
 
@@ -212,7 +212,7 @@ class DeepSeekOCRClient:
                 ) from exc
             raise DeepSeekOCRClientError(
                 "DeepSeek OCR server is not reachable. "
-                "Start the llama.cpp server from the OCR tab first. "
+                "Start run_server.bat and check health first. "
                 f"{exc}"
             ) from exc
 

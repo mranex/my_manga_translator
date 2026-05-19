@@ -247,15 +247,9 @@ class MainWindow(QMainWindow):
         set_project_log_dir(None)
         write_crash_breadcrumb("MainWindow initializing", workspace_root=str(self.workspace_root))
 
-        default_server_url = "http://127.0.0.1:8080"
-        default_model_path = self.workspace_root / "model" / "paddleocr_vl" / "model.gguf"
-        default_mmproj_path = self.workspace_root / "model" / "paddleocr_vl" / "mmproj.gguf"
-        default_llama_cpp_dir = self.workspace_root / "tools" / "llama.cpp"
         self.llama_server_manager = LlamaServerManager(
-            server_url=default_server_url,
-            model_path=default_model_path,
-            mmproj_path=default_mmproj_path,
-            llama_cpp_dir=default_llama_cpp_dir,
+            workspace_root=self.workspace_root,
+            server_url="http://127.0.0.1:8080",
             gpu_layers=99,
             ctx_size=8192,
         )
@@ -351,7 +345,7 @@ class MainWindow(QMainWindow):
         self.project_panel = ProjectPanel()
         self.process_panel = ProcessPanel()
         self.detection_panel = DetectionPanel()
-        self.ocr_panel = OCRPanel()
+        self.ocr_panel = OCRPanel(self.workspace_root)
         self.translation_panel = TranslationPanel()
         self.inpaint_panel = InpaintPanel()
         self.render_panel = RenderPanel(self.workspace_root)
@@ -701,7 +695,9 @@ class MainWindow(QMainWindow):
 
         self.ocr_panel.start_server_requested.connect(self.start_llama_server)
         self.ocr_panel.check_server_requested.connect(self.check_llama_server)
-        self.ocr_panel.stop_server_requested.connect(self.stop_llama_server)
+        self.ocr_panel.create_run_server_bat_requested.connect(self.create_llama_run_server_bat)
+        self.ocr_panel.check_run_server_bat_requested.connect(self.check_llama_run_server_bat)
+        self.ocr_panel.open_server_folder_requested.connect(self.open_llama_server_folder)
         self.ocr_panel.prepare_selected_requested.connect(self.prepare_ocr_items_for_selected_page)
         self.ocr_panel.reprepare_selected_requested.connect(lambda: self.prepare_ocr_items_for_selected_page(force=True))
         self.ocr_panel.prepare_all_requested.connect(self.prepare_ocr_items_for_all_pages)
@@ -1559,6 +1555,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Selected box restored")
 
     def start_llama_server(self) -> None:
+        if self.current_ocr_config().ocr_provider == OCR_PROVIDER_CHROME_LENS:
+            self.statusBar().showMessage("Chrome Lens does not use a local OCR server.")
+            self.log("Chrome Lens does not use a local OCR server.")
+            return
         if not self._apply_server_inputs_to_manager():
             return
         self._select_stage("ocr")
@@ -1566,16 +1566,47 @@ class MainWindow(QMainWindow):
         self._start_llama_server_action("start", timeout_seconds=60.0)
 
     def check_llama_server(self) -> None:
+        self._select_stage("ocr")
+        current_config = self.current_ocr_config()
+        if current_config.ocr_provider == OCR_PROVIDER_CHROME_LENS:
+            self._persist_panel_preferences()
+            self._start_llama_server_action(
+                "check_provider",
+                timeout_seconds=30.0,
+                ocr_config=current_config,
+            )
+            return
+        if not self._apply_server_inputs_to_manager():
+            return
+        self._start_llama_server_action("check", timeout_seconds=5.0, ocr_config=current_config)
+
+    def create_llama_run_server_bat(self) -> None:
+        if self.current_ocr_config().ocr_provider == OCR_PROVIDER_CHROME_LENS:
+            return
         if not self._apply_server_inputs_to_manager():
             return
         self._select_stage("ocr")
-        self._start_llama_server_action("check", timeout_seconds=5.0)
+        self._start_llama_server_action("create_bat", timeout_seconds=10.0)
+
+    def check_llama_run_server_bat(self) -> None:
+        if self.current_ocr_config().ocr_provider == OCR_PROVIDER_CHROME_LENS:
+            return
+        if not self._apply_server_inputs_to_manager():
+            return
+        self._select_stage("ocr")
+        self._start_llama_server_action("check_bat", timeout_seconds=10.0)
+
+    def open_llama_server_folder(self) -> None:
+        if self.current_ocr_config().ocr_provider == OCR_PROVIDER_CHROME_LENS:
+            return
+        if not self._apply_server_inputs_to_manager():
+            return
+        self._select_stage("ocr")
+        self._start_llama_server_action("open_folder", timeout_seconds=10.0)
 
     def stop_llama_server(self) -> None:
-        if not self._apply_server_inputs_to_manager():
-            return
-        self._select_stage("ocr")
-        self._start_llama_server_action("stop", timeout_seconds=10.0)
+        self.statusBar().showMessage("Local OCR server is external. Stop it from its own terminal/window.")
+        self.log("Local OCR server is external. Stop it from its own terminal/window.")
 
     def _on_ocr_provider_changed(self, provider_name: str) -> None:
         normalized = str(provider_name or DEFAULT_OCR_PROVIDER).strip()
@@ -4583,11 +4614,18 @@ class MainWindow(QMainWindow):
         self.header.set_progress_value(0)
         self.statusBar().showMessage("Rendering translated pages...")
 
-    def _start_llama_server_action(self, action: str, *, timeout_seconds: float) -> None:
+    def _start_llama_server_action(
+        self,
+        action: str,
+        *,
+        timeout_seconds: float,
+        ocr_config: OCRConfig | None = None,
+    ) -> None:
         task = LlamaServerTask(
             name=f"llama.cpp server: {action}",
             stage="ocr",
             manager=self.llama_server_manager,
+            ocr_config=ocr_config,
             action=action,
             timeout_seconds=timeout_seconds,
         )
@@ -5917,7 +5955,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("llama.cpp server action finished")
             return
 
-        self.ocr_panel.set_server_status(result.state)
+        if action in {"check", "check_provider"}:
+            self.ocr_panel.set_server_status(result.state)
+        elif action == "start":
+            self.ocr_panel.set_server_status(SERVER_STATE_STARTING)
         self.statusBar().showMessage(result.message)
         self.log(result.message)
 
@@ -5929,17 +5970,17 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._finish_worker(worker)
         self.ocr_panel.set_server_actions_enabled(True)
-        self.ocr_panel.set_server_status(SERVER_STATE_ERROR)
-        self.statusBar().showMessage("llama.cpp server action failed")
-        self.show_error("llama.cpp server error", message)
+        if action in {"check", "check_provider", "start"}:
+            self.ocr_panel.set_server_status(SERVER_STATE_ERROR)
+        self.statusBar().showMessage("OCR runtime action failed")
+        title = "Chrome Lens OCR error" if action == "check_provider" and self.current_ocr_config().ocr_provider == OCR_PROVIDER_CHROME_LENS else "Local OCR server error"
+        self.show_error(title, message)
 
     def _apply_server_inputs_to_manager(self) -> bool:
         try:
             self._persist_panel_preferences()
-            self.llama_server_manager.update_config(
-                **self.config_panel.ocr_server_values(),
-                provider_key=self.current_ocr_config().ocr_provider,
-            )
+            ocr_config = self.current_ocr_config()
+            self.llama_server_manager.update_config(**self.config_panel.ocr_server_values(), provider_key=ocr_config.ocr_provider)
         except Exception as exc:
             self.ocr_panel.set_server_status(SERVER_STATE_ERROR)
             self.show_error("Invalid server settings", str(exc))

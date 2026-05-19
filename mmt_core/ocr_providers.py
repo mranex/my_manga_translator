@@ -71,7 +71,7 @@ class PaddleOCRVLProvider:
 
         if not is_alive:
             raise OCRProviderError(
-                "PaddleOCR-VL server is not reachable. Start the llama.cpp server from the OCR tab first."
+                "Local OCR server is not reachable. Start run_server.bat and check health first."
             )
 
     def recognize_image(self, crop_path: Path | str) -> str:

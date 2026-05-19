@@ -77,7 +77,7 @@ class PaddleOCRVLClient:
 
         raise PaddleOCRVLClientError(
             "PaddleOCR-VL server is not reachable. "
-            "Start the llama.cpp server from the OCR tab first. "
+            "Start run_server.bat and check health first. "
             f"{last_error}"
         )
 
@@ -159,7 +159,7 @@ class PaddleOCRVLClient:
                 ) from exc
             raise PaddleOCRVLClientError(
                 "PaddleOCR-VL server is not reachable. "
-                "Start the llama.cpp server from the OCR tab first. "
+                "Start run_server.bat and check health first. "
                 f"{exc}"
             ) from exc
 

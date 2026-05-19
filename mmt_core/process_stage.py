@@ -166,7 +166,7 @@ def run_process_pipeline(
         provider_label = normalized_ocr_config.provider_label
         if normalized_ocr_config.requires_llama_server:
             raise RuntimeError(
-                f"{provider_label} server is not reachable. Start/check it from OCR tab first. "
+                f"{provider_label} server is not reachable. Start run_server.bat and check health first. "
                 f"Details: {exc}"
             ) from exc
         raise RuntimeError(f"{provider_label} is unavailable: {exc}") from exc

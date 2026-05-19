@@ -31,7 +31,7 @@ class OCRService(BaseService):
 
     def on_initialize(self) -> None:
         self._emit_status("loading", "Starting OCR worker...")
-        self._emit_log("info", "OCR service is ready. PaddleOCR-VL server remains user-controlled.")
+        self._emit_log("info", "OCR service is ready. Local OCR server remains user-controlled.")
 
     def on_shutdown(self) -> None:
         self._close_provider()

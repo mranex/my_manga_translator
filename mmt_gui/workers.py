@@ -400,6 +400,7 @@ class LlamaServerTask(PipelineTask):
     """Configuration for a llama.cpp server action."""
 
     manager: LlamaServerManager | None = None
+    ocr_config: OCRConfig | None = None
     action: str = "check"
     timeout_seconds: float = 30.0
 
@@ -592,7 +593,7 @@ def create_render_worker(task: RenderTask) -> TaskWorker:
 
 
 def create_llama_server_worker(task: LlamaServerTask) -> TaskWorker:
-    """Create a QRunnable that manages the llama.cpp server off the UI thread."""
+    """Create a QRunnable that runs OCR runtime checks and local server actions off the UI thread."""
 
     return TaskWorker(task=task, callback=_run_llama_server_task)
 
@@ -1651,18 +1652,41 @@ def _run_llama_server_task(
         raise TypeError("llama.cpp server worker received an unexpected task type.")
 
     if task.manager is None:
-        raise ValueError("No llama.cpp server manager was provided.")
+        if str(task.action or "").strip().lower() != "check_provider":
+            raise ValueError("No llama.cpp server manager was provided.")
 
     action = str(task.action).strip().lower()
-    signals.message.emit(f"Running llama.cpp server action: {action}")
+    signals.message.emit(f"Running OCR runtime action: {action}")
 
     if action == "check":
         status = task.manager.check_server(timeout=min(float(task.timeout_seconds), 5.0))
+    elif action == "check_provider":
+        config = OCRConfig.from_value(task.ocr_config)
+        provider = create_ocr_provider(config)
+        try:
+            provider.validate()
+        finally:
+            provider.close()
+        if config.ocr_provider == "chrome_lens":
+            status = LlamaServerStatus(
+                state="Ready",
+                message="Chrome Lens OCR is available.",
+                is_alive=True,
+                managed=False,
+            )
+        else:
+            status = task.manager.check_server(timeout=min(float(task.timeout_seconds), 5.0))
     elif action == "start":
         status = task.manager.start_server(
             timeout=float(task.timeout_seconds),
             logger=signals.message.emit,
         )
+    elif action == "create_bat":
+        status = task.manager.create_run_server_bat_status()
+    elif action == "check_bat":
+        status = task.manager.check_run_server_bat_status()
+    elif action == "open_folder":
+        status = task.manager.open_server_folder_status()
     elif action == "stop":
         status = task.manager.stop_server(
             timeout=float(task.timeout_seconds),
