@@ -294,14 +294,20 @@ class OCRService(BaseService):
         if not callable(clear_after_page):
             return
 
+        provider_name = str(getattr(provider, "provider_label", "Local OCR") or "Local OCR")
+        provider_key = str(getattr(provider, "provider_key", "") or "").strip()
+
         try:
-            result = clear_after_page()
+            try:
+                result = clear_after_page(logger=logger)
+            except TypeError:
+                result = clear_after_page()
         except Exception as exc:
-            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {exc}")
+            logger(f"{provider_name} slot cache clear warning after page {page_name}: {exc}")
             return
 
         if not isinstance(result, dict):
-            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: unexpected result.")
+            logger(f"{provider_name} slot cache clear warning after page {page_name}: unexpected result.")
             return
 
         errors = result.get("errors")
@@ -310,18 +316,22 @@ class OCRService(BaseService):
 
         if not bool(result.get("supported", False)):
             if str(result.get("reason", "")).strip() == "unsupported":
-                logger("llama.cpp /slots erase endpoint is unavailable; skipping DeepSeek OCR slot cache clear.")
+                logger(
+                    f"llama.cpp /slots erase endpoint is unavailable; skipping {provider_name} slot cache clear."
+                )
             elif errors:
-                logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {errors[0]}")
+                logger(f"{provider_name} slot cache clear warning after page {page_name}: {errors[0]}")
+            elif provider_key:
+                logger(f"{provider_name} slot cache clear warning after page {page_name}: unsupported.")
             return
 
         logger(
-            "Cleared DeepSeek OCR llama.cpp slot cache after page "
+            f"Cleared {provider_name} llama.cpp slot cache after page "
             f"{page_name}: cleared={int(result.get('cleared', 0))}, "
             f"skipped_processing={int(result.get('skipped_processing', 0))}"
         )
         if errors:
-            logger(f"DeepSeek OCR slot cache clear warning after page {page_name}: {errors[0]}")
+            logger(f"{provider_name} slot cache clear warning after page {page_name}: {errors[0]}")
 
     def _close_provider(self) -> None:
         if self._provider is None:

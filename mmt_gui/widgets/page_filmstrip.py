@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QMargins, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QMargins, QByteArray, QMimeData, QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QDrag,
     QFont,
     QImageReader,
     QLinearGradient,
@@ -37,6 +38,7 @@ PIXMAP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 DEFAULT_THUMBNAIL_SIZE = QSize(144, 177)
 DEFAULT_ITEM_SIZE = QSize(176, 224)
 THUMBNAIL_BATCH_SIZE = 10
+FILMSTRIP_DRAG_MIME = "application/x-manga-translator-filmstrip-row"
 
 
 class _FilmstripDelegate(QStyledItemDelegate):
@@ -192,9 +194,13 @@ class _FilmstripListWidget(QListWidget):
         self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(False)
         self.setResizeMode(QListView.ResizeMode.Adjust)
-        self.setMovement(QListView.Movement.Snap)
+        self.setMovement(QListView.Movement.Static)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropOverwriteMode(False)
+        self.setDropIndicatorShown(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -203,6 +209,7 @@ class _FilmstripListWidget(QListWidget):
         self._delegate = _FilmstripDelegate(self)
         self.setGridSize(DEFAULT_ITEM_SIZE + QSize(16, 10))
         self.setItemDelegate(self._delegate)
+        self._drag_row = -1
         self.currentRowChanged.connect(self._emit_page_selected)
 
     def set_metrics(self, thumbnail_size: QSize, item_size: QSize) -> None:
@@ -228,9 +235,110 @@ class _FilmstripListWidget(QListWidget):
         if row >= 0:
             self.page_selected.emit(row)
 
+    def startDrag(self, supported_actions) -> None:  # type: ignore[override]
+        source_row = self.currentRow()
+        if source_row < 0:
+            return
+
+        self._drag_row = source_row
+        item_rect = self.visualRect(self.model().index(source_row, 0))
+
+        mime = QMimeData()
+        mime.setData(FILMSTRIP_DRAG_MIME, QByteArray(str(source_row).encode("utf-8")))
+
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        if item_rect.isValid():
+            drag.setPixmap(self.viewport().grab(item_rect))
+            drag.setHotSpot(item_rect.center() - item_rect.topLeft())
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self._drag_row = -1
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if self._accept_internal_drag(event):
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._accept_internal_drag(event):
+            return
+        super().dragMoveEvent(event)
+
     def dropEvent(self, event) -> None:  # type: ignore[override]
-        super().dropEvent(event)
-        self.page_order_changed.emit(self.page_order())
+        if not self._accept_internal_drag(event, accept=False):
+            super().dropEvent(event)
+            return
+
+        source_row = self._source_row_from_event(event)
+        target_row = self._target_row_for_position(event.position().toPoint(), source_row)
+        if self.move_page_row(source_row, target_row):
+            event.acceptProposedAction()
+            self.page_order_changed.emit(self.page_order())
+            return
+        event.ignore()
+
+    def move_page_row(self, source_row: int, target_row: int) -> bool:
+        if source_row < 0 or source_row >= self.count():
+            return False
+
+        target_row = max(0, min(target_row, self.count() - 1))
+        if source_row == target_row:
+            return False
+
+        item = self.takeItem(source_row)
+        if item is None:
+            return False
+
+        self.insertItem(target_row, item)
+        self.setCurrentRow(target_row)
+        return True
+
+    def _accept_internal_drag(self, event, *, accept: bool = True) -> bool:
+        if self.dragDropMode() == QAbstractItemView.DragDropMode.NoDragDrop:
+            return False
+        if event.source() is not self:
+            return False
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasFormat(FILMSTRIP_DRAG_MIME):
+            return False
+        if accept:
+            event.acceptProposedAction()
+        return True
+
+    def _source_row_from_event(self, event) -> int:
+        mime_data = event.mimeData()
+        if mime_data is not None and mime_data.hasFormat(FILMSTRIP_DRAG_MIME):
+            try:
+                return int(bytes(mime_data.data(FILMSTRIP_DRAG_MIME)).decode("utf-8"))
+            except Exception:
+                pass
+        if self._drag_row >= 0:
+            return self._drag_row
+        return self.currentRow()
+
+    def _target_row_for_position(self, position: QPoint, source_row: int) -> int:
+        if self.count() <= 1:
+            return source_row
+
+        index = self.indexAt(position)
+        if index.isValid():
+            rect = self.visualRect(index)
+            target_row = index.row()
+            if position.x() >= rect.center().x():
+                target_row += 1
+            if source_row < target_row:
+                target_row -= 1
+            return max(0, min(target_row, self.count() - 1))
+
+        first_rect = self.visualRect(self.model().index(0, 0))
+        last_rect = self.visualRect(self.model().index(self.count() - 1, 0))
+        if position.x() <= first_rect.center().x():
+            return 0
+        if position.x() >= last_rect.center().x():
+            return self.count() - 1
+        return source_row
 
     def page_order(self) -> list[str]:
         ordered: list[str] = []
@@ -274,7 +382,7 @@ class PageFilmstripWidget(QFrame):
         self.list_widget = _FilmstripListWidget(self)
         self.list_widget.set_metrics(self._thumbnail_size, self._item_size)
         self.list_widget.page_selected.connect(self.page_selected.emit)
-        self.list_widget.page_order_changed.connect(self.page_order_changed.emit)
+        self.list_widget.page_order_changed.connect(self._on_page_order_changed)
         layout.addWidget(self.list_widget)
         self._apply_dynamic_metrics(force=True)
 
@@ -372,18 +480,33 @@ class PageFilmstripWidget(QFrame):
 
     def set_reorder_enabled(self, enabled: bool) -> None:
         self._reorder_enabled = bool(enabled)
+        self.list_widget.setMovement(QListView.Movement.Static)
         self.list_widget.setDragDropMode(
-            QAbstractItemView.DragDropMode.InternalMove
+            QAbstractItemView.DragDropMode.DragDrop
             if self._reorder_enabled
             else QAbstractItemView.DragDropMode.NoDragDrop
         )
-        self.list_widget.setMovement(
-            QListView.Movement.Snap if self._reorder_enabled else QListView.Movement.Static
-        )
+        self.list_widget.setDragEnabled(self._reorder_enabled)
+        self.list_widget.setAcceptDrops(self._reorder_enabled)
+        self.list_widget.viewport().setAcceptDrops(self._reorder_enabled)
         tooltip = "Drag thumbnails to reorder project pages." if self._reorder_enabled else (
             "Page reordering is temporarily disabled while workflow tasks are running."
         )
         self.list_widget.setToolTip(tooltip)
+
+    def _on_page_order_changed(self, ordered_paths: list[str]) -> None:
+        self._rebuild_page_rows()
+        self.page_order_changed.emit(ordered_paths)
+
+    def _rebuild_page_rows(self) -> None:
+        self._page_rows.clear()
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if item is None:
+                continue
+            page_relative_path = str(item.data(PAGE_ROLE) or "")
+            if page_relative_path:
+                self._page_rows[page_relative_path] = row
 
     def _display_thumbnail_for_page(self, page_relative_path: str) -> QPixmap:
         cached = self._thumbnail_from_cache(page_relative_path)
