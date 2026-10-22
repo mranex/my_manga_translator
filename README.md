@@ -22,9 +22,9 @@ Khác biệt hoàn toàn so với các công cụ dịch tự động một nút
 
 ## 📸 Giao Diện Thực Tế (Visual Showcase)
 
-| 🖥️ Giao Diện Điều Khiển Stage | 📝 Trình Tinh Chỉnh Dữ Liệu |
-| :---: | :---: |
-| ![Giao Diện Điều Khiển Stage](Screenshot/Main_UI.png) | ![Trình Tinh Chỉnh Dữ Liệu](Screenshot/Editor_UI.png) |
+| 🖥️ Giao Diện Điều Khiển Stage |
+| :---: |
+| ![Giao Diện Điều Khiển Stage](Screenshot/Main_UI.png) |
 
 > [!TIP]
 > *Hãy chụp những bức ảnh chụp màn hình tuyệt đẹp về giao diện ứng dụng của bạn và lưu vào thư mục `Screenshot/` để làm sáng bừng file README này nhé!*
