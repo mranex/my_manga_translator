@@ -24,8 +24,7 @@ Khác biệt hoàn toàn so với các công cụ dịch tự động một nút
 
 | 🖥️ Giao Diện Điều Khiển Stage |
 | :---: |
-| ![Giao Diện Điều Khiển Stage](Screenshot/Main_UI.png) |
-
+| ![Giao Diện Điều Khiển Stage](docs/Main_UI.png) Link video: [Demo](https://www.tiktok.com/@mranexx/video/7642944799577738516)|
 > [!TIP]
 > *Hãy chụp những bức ảnh chụp màn hình tuyệt đẹp về giao diện ứng dụng của bạn và lưu vào thư mục `Screenshot/` để làm sáng bừng file README này nhé!*
 
